@@ -124,6 +124,8 @@ footer a { color: var(--text-2); }
   </div>
   <div class="card span-4"><h2>Models</h2><div id="models"></div></div>
 
+  <div class="card span-12" id="machines-card" hidden><h2>Machines</h2><div id="machines"></div></div>
+
   <div class="card span-12"><h2>Waste, and how to fix it</h2><div id="findings"></div></div>
 
   <div class="card span-6"><h2>Projects</h2><div id="projects"></div></div>
@@ -198,7 +200,7 @@ function render() {
     sel.innerHTML = `<option value="">All projects</option>` + d.projects.map((p) => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join("");
     sel.value = cur;
   }
-  renderChart(); renderModels(); renderFindings(); renderProjects(); renderSessions(); drawCard();
+  renderChart(); renderModels(); renderMachines(); renderFindings(); renderProjects(); renderSessions(); drawCard();
 }
 
 function modelColors() {
@@ -258,6 +260,16 @@ function renderModels() {
       <td class="r num">${fmt(x.tokens)}</td><td class="r num">${x.priced ? money(x.cost) : '<span class="muted">no price</span>'}</td></tr>`).join("") + `</table>`;
 }
 
+function renderMachines() {
+  const ms = state.data.machines || [];
+  $("machines-card").hidden = ms.length < 2;
+  if (ms.length < 2) return;
+  const max = Math.max(...ms.map((m) => m.tokens), 1);
+  $("machines").innerHTML = `<table><tr><th>Machine</th><th class="r">Sessions</th><th class="r">Tokens</th><th class="r">Cost</th></tr>` +
+    ms.map((m) => `<tr><td><span class="name">${esc(m.machine)}</span><div class="bar"><i style="width:${100 * m.tokens / max}%"></i></div></td>
+      <td class="r num">${fmt(m.sessions)}</td><td class="r num">${fmt(m.tokens)}</td><td class="r num">${money(m.cost)}</td></tr>`).join("") + `</table>`;
+}
+
 function fixHtml(f) {
   const names = { claude: "Claude Code", codex: "Codex" };
   const srcs = Object.keys(f.fix);
@@ -314,7 +326,7 @@ function renderSessions() {
   if (!ss.length) { $("sessions").innerHTML = `<div class="empty">No sessions.</div>`; return; }
   $("sessions").innerHTML = `<table><tr><th>Session</th><th class="r">Tool calls</th><th class="r">Tokens</th><th class="r">Cost</th></tr>` +
     ss.slice(0, 12).map((s) => `<tr><td><div class="ellipsis name">${esc(s.title || s.id)}</div>
-      <div class="muted"><span class="name">${esc(s.project)}</span> · ${s.source}${s.parent ? " subagent" : ""} · ${ago(s.last_ts)}</div></td>
+      <div class="muted"><span class="name">${esc(s.project)}</span> · ${s.source}${s.parent ? " subagent" : ""}${s.machine ? ` · <span class="name">${esc(s.machine)}</span>` : ""} · ${ago(s.last_ts)}</div></td>
       <td class="r num">${fmt(s.calls)}</td><td class="r num">${fmt(s.tokens)}</td><td class="r num">${money(s.cost)}</td></tr>`).join("") + `</table>`;
 }
 

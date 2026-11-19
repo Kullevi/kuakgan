@@ -98,36 +98,78 @@ git clone https://github.com/Kullevi/kuakgan.git ~/kuakgan
 ### 2. Read the logs once
 
 Run `kuakgan index`. The first run reads all of the user's Claude Code and
-Codex logs; with a few gigabytes of logs it takes a minute or two and prints
+Codex logs; with several gigabytes of logs it takes a minute or two and prints
 its progress. Later runs read only what is new, in a second or two. Then run
-`kuakgan summary` and tell the user, in a few plain sentences, what it shows:
-tokens and estimated cost in the last 30 days, the main models, and the biggest
-waste with its fix.
+`kuakgan summary`, which gives the main points in a few kilobytes of JSON, and
+tell the user in a few plain sentences what it shows: tokens and estimated
+cost in the last 30 days, the main models, and the biggest waste with its fix.
+If much of the usage comes from models without a price, say so: the dollar
+figure then leaves that part out (`cost_note` says how much).
 
-Kuakgan finds the logs in `~/.claude/projects` and `~/.codex/sessions` (or
-under `CLAUDE_CONFIG_DIR` and `CODEX_HOME` when those are set). If either
-folder is missing, that tool has simply not been used on this computer.
+Kuakgan finds the logs in `~/.claude/projects`, `~/.codex/sessions` and
+`~/.codex/archived_sessions` (or under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
+when those are set). If a folder is missing, that tool has simply not been
+used on this computer.
 
-### 3. Show the user (Agent)
+### 3. Other computers (Agent, after asking the user)
 
-Start the dashboard **in the background**, since it keeps running until
-stopped:
+Ask the user whether they also run Claude Code or Codex on other computers,
+such as a second laptop or build machines. If they do, this computer can
+include those logs too, so the dashboard shows all of their usage and
+`kuakgan check` learns from mistakes made on every machine. Nothing is
+installed on the other computers: Kuakgan reads their logs over SSH, and only
+the results travel.
 
-- Bash or zsh: `nohup <python> <path>/kuakgan.py dashboard > /dev/null 2>&1 &`
-- PowerShell: `Start-Process <python> -ArgumentList '<path>/kuakgan.py','dashboard' -WindowStyle Hidden`
+Each other computer needs:
 
-It opens `http://127.0.0.1:8766/` in a window of its own (with Edge or Chrome
-installed; otherwise in a normal browser tab). Tell the user that:
+- **SSH from this computer without a password.** Check with
+  `ssh -o BatchMode=yes USER@ADDRESS echo ok`, which must print `ok` without
+  asking for anything. If the user has
+  [Girdish](https://github.com/Kullevi/girdish) set up, its machines already
+  work. Otherwise help the user turn on SSH and copy this computer's key
+  there; the [Girdish README](https://github.com/Kullevi/girdish#setup-for-the-agent-doing-it)
+  has the exact steps for Linux, macOS and Windows. Any step that asks for a
+  password is for the user to run in their own terminal, never in chat.
+- **Python 3.9 or newer** there (usual on Linux and macOS; on Windows see
+  step 1).
+
+Then add each computer:
+
+```
+kuakgan machines add NAME USER@ADDRESS
+```
+
+`NAME` is a short name the user recognises, such as `build-pc`. Instead of
+`USER@ADDRESS` you can give a `Host` alias from `~/.ssh/config`, and `--key`
+and `--port` when needed. The first time, that computer reads all of its own
+logs, which takes as long as step 2 did here. Afterwards `summary`, `findings`
+and the dashboard fetch what is new from every machine at most every ten
+minutes, and `kuakgan index` does it at once. `kuakgan machines` lists them;
+a machine that is off is skipped and tried again next time.
+
+### 4. Show the user (Agent)
+
+Start the dashboard:
+
+```
+kuakgan dashboard --background
+```
+
+It starts as a process of its own, so it keeps running after your command
+returns, and answers once it is ready. It opens `http://127.0.0.1:8766/` in a
+window of its own (with Edge or Chrome installed; otherwise in a normal browser
+tab). On a computer without a screen, such as one you reach over SSH, it
+prints the address instead: give it to the user. Tell the user that:
 
 - the period buttons and the project menu change what is shown;
-- "Hide names" blurs project and session names, for screenshots;
+- "Hide names" blurs project, session and machine names, for screenshots;
 - the card at the bottom shows only totals, and can be downloaded or copied to
   post;
 - they can ask you to "open the Kuakgan dashboard" again later.
 
-To stop it, end the process that listens on port 8766.
+To stop it: `kuakgan dashboard --stop`.
 
-### 4. Let the agents use it (Agent, after asking the user)
+### 5. Let the agents use it (Agent, after asking the user)
 
 This is what makes Kuakgan useful every day rather than once. Ask the user
 before doing it, since it changes how every future session behaves. Then add
@@ -154,7 +196,7 @@ file):
 Use the same full Python command and path as above. The hook prints a few
 short lines, which Claude Code adds to the session's context.
 
-### 5. Act on what it found (Agent, with the user)
+### 6. Act on what it found (Agent, with the user)
 
 Go through the biggest findings from `kuakgan findings` with the user and offer
 to apply the fixes that are theirs to make, one at a time, for example:
@@ -175,16 +217,18 @@ Every command answers in JSON, except `check --hook` and `instructions`.
 
 | Command | What it does |
 |---|---|
-| `summary [--days N] [--project P]` | Tokens, cost, models, projects, top sessions and waste. Default: the last 30 days; `--days 0` means all. |
+| `summary [--days N] [--project P] [--full]` | The main points: tokens, cost, models, machines, projects, top sessions and waste. Default: the last 30 days; `--days 0` means all. `--full` adds every day and where each finding happened. |
 | `findings [--days N] [--project P]` | The waste patterns, each with what it is, what it cost, a fix, and where it happened most. |
 | `sessions [--days N] [--project P] [--limit N]` | Recent sessions with their tokens, cost and tool calls. |
 | `check [--dir DIR] [--hook]` | For agents: earlier mistakes in this project and what worked instead, files often re-read, repeated scripts, and the current session. `--hook` gives short plain text. |
 | `instructions` | The block to add to `CLAUDE.md` or `AGENTS.md`, with this computer's command filled in. |
-| `index [--rebuild]` | Read new and changed logs now. Every other command does this by itself. |
-| `dashboard [--port P] [--no-browser]` | The dashboard on `http://127.0.0.1:8766/`. |
+| `machines [add NAME ADDRESS [--user U] [--key PATH] [--port P] \| remove NAME]` | Other computers whose logs to include, read over SSH. Without arguments, lists them. |
+| `index [--rebuild]` | Read new and changed logs now, here and on the other machines. Every other command does this by itself. |
+| `dashboard [--background] [--stop] [--port P] [--no-browser]` | The dashboard on `http://127.0.0.1:8766/`. `--background` starts it as a process of its own; `--stop` stops it. |
 
 `--project` takes a project's folder name (as shown in `summary`) or its full
-path.
+path. Tokens and cost count the model calls made in the period; sessions, tool
+calls and waste count the sessions that were active in it.
 
 ### What counts as waste
 
@@ -211,10 +255,28 @@ Kuakgan knows Anthropic's list prices. To add or change a price, put a
 `cache_write` defaults to 1.25 times the input price. A model matches the
 longest name in the table that it starts with.
 
+## Add another tool
+
+Kuakgan reads Claude Code and Codex, because those are the tools we use and
+can test. Others, such as Gemini CLI, Antigravity, Grok or Cursor, are welcome
+as pull requests. Reading a tool takes three things in `kuakgan.py`:
+
+1. **Where its logs are:** a few lines in `log_files()`, with a `source` name.
+2. **A reader:** a function like `parse_claude()` or `parse_codex()` that turns
+   one log file into sessions: usage per model call (`add_usage`) and tool
+   calls (`make_call`). Everything after that, from findings to the dashboard,
+   works unchanged. Add the source to `parse_file()`.
+3. **A test:** a small, made-up log in the format the tool really writes, in
+   `tests/test_kuakgan.py`, checking tokens and a finding.
+
+Please build it from real logs of a current version of the tool, and say
+which version in the pull request.
+
 ## Privacy
 
-Kuakgan only reads files on your computer and writes its index (`.kuakgan.db`)
-next to `kuakgan.py`. The dashboard listens on `127.0.0.1` only. The index
+Kuakgan only reads files on your computer, and on the other computers you add
+over SSH, and writes its index (`.kuakgan.db`) next to `kuakgan.py`. The list
+of other computers is in `kuakgan.json` next to it. The dashboard listens on `127.0.0.1` only. The index
 keeps the first 400 characters of each command and the line of an error, so
 that it can show you what failed; it keeps no file contents, and of the
 conversation only each session's title or the start of its first prompt. Delete `.kuakgan.db` to remove

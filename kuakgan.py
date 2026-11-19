@@ -22,6 +22,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 import sys
 import time
 import webbrowser
@@ -31,9 +32,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-HERE = Path(__file__).resolve().parent
+# On another machine the source runs without a file of its own (see REMOTE_BOOT).
+HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 DB_PATH = Path(os.environ.get("KUAKGAN_DB", HERE / ".kuakgan.db"))
-INDEX_VERSION = 7  # bump when parsing changes; the index is then rebuilt
+MACHINES_PATH = Path(os.environ.get("KUAKGAN_MACHINES", HERE / "kuakgan.json"))
+PULL_EVERY = 600  # seconds between fetching from other machines, except for `index`
+INDEX_VERSION = 8  # bump when parsing changes; the index is then rebuilt
 
 
 def claude_root() -> Path:
@@ -603,6 +607,8 @@ def session_findings(s: dict) -> list[dict]:
             if (d["tool"] == c["tool"] and d["prog"] == c["prog"] and d["text"] and not d["err"]
                     and d["text"] != c["text"]):
                 a, b = c["text"][:200], d["text"][:200]
+                if a == b:  # the difference lies past what is kept
+                    break
                 if difflib.SequenceMatcher(None, a, b).quick_ratio() >= 0.6 and \
                         difflib.SequenceMatcher(None, a, b).ratio() >= 0.5:
                     fixes.append({"failed": a, "worked": b})
@@ -625,7 +631,7 @@ CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, file TEXT, source TEXT
   cwd TEXT, project TEXT, title TEXT, client TEXT, first_ts REAL, last_ts REAL, user_msgs INTEGER,
   compactions INTEGER, calls INTEGER, errors INTEGER, input INTEGER, cache_read INTEGER,
   cache_write INTEGER, output INTEGER, requests INTEGER, cost REAL, unpriced INTEGER,
-  last_context INTEGER, models TEXT);
+  last_context INTEGER, models TEXT, machine TEXT);
 CREATE TABLE IF NOT EXISTS usage (session TEXT, hour TEXT, model TEXT, input INTEGER,
   cache_read INTEGER, cache_write INTEGER, output INTEGER, requests INTEGER, cost REAL);
 CREATE TABLE IF NOT EXISTS calls (session TEXT, seq INTEGER, ts REAL, tool TEXT, kind TEXT,
@@ -639,6 +645,7 @@ CREATE INDEX IF NOT EXISTS calls_script ON calls(script);
 CREATE INDEX IF NOT EXISTS findings_s ON findings(session);
 CREATE INDEX IF NOT EXISTS sessions_file ON sessions(file);
 CREATE INDEX IF NOT EXISTS sessions_last ON sessions(last_ts);
+CREATE INDEX IF NOT EXISTS files_path ON files(path);
 """
 
 
@@ -686,7 +693,8 @@ def project_of(cwd: str) -> str:
     return path.rsplit("/", 1)[-1] or path or "(unknown)"
 
 
-def store(db: sqlite3.Connection, path: str, source: str, size: int, mtime: float, result) -> None:
+def store(db: sqlite3.Connection, path: str, source: str, size: int, mtime: float, result,
+          machine: str = "") -> None:
     for (sid,) in db.execute("SELECT id FROM sessions WHERE file=?", (path,)).fetchall():
         for table, col in (("usage", "session"), ("calls", "session"), ("findings", "session"),
                            ("sessions", "id")):
@@ -696,6 +704,9 @@ def store(db: sqlite3.Connection, path: str, source: str, size: int, mtime: floa
     if error:
         return
     for s in result:
+        if machine:
+            s["id"] = f"{machine}:{s['id']}"
+            s["parent"] = s["parent"] and f"{machine}:{s['parent']}"
         usage = s["usage"]
         tot = [sum(v[i] for v in usage.values()) for i in range(6)]
         models = Counter()
@@ -704,12 +715,12 @@ def store(db: sqlite3.Connection, path: str, source: str, size: int, mtime: floa
         db.execute("DELETE FROM sessions WHERE id=?", (s["id"],))
         for table in ("usage", "calls", "findings"):
             db.execute(f"DELETE FROM {table} WHERE session=?", (s["id"],))
-        db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             s["id"], path, s["source"], s["parent"], s["cwd"], project_of(s["cwd"]),
             s["title"] or s["first_prompt"], s["client"], s["first_ts"], s["last_ts"], s["user_msgs"],
             s["compactions"], len(s["calls"]), sum(c["err"] for c in s["calls"]), tot[0], tot[1],
             tot[2], tot[3], tot[4], tot[5], s["unpriced"], s["last_context"],
-            json.dumps(dict(models.most_common()))))
+            json.dumps(dict(models.most_common())), machine))
         db.executemany("INSERT INTO usage VALUES (?,?,?,?,?,?,?,?,?)",
                        [(s["id"], h, m, *v) for (h, m), v in usage.items()])
         db.executemany("INSERT INTO calls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
@@ -721,11 +732,15 @@ def store(db: sqlite3.Connection, path: str, source: str, size: int, mtime: floa
             for f in s["findings"]])
 
 
-def update_index(quiet: bool = False, only: list[str] | None = None) -> dict:
-    """Brings the index up to date with the log files; only new or changed files are read."""
+def update_index(quiet: bool = False, only: list[str] | None = None, pull: bool | None = False) -> dict:
+    """Brings the index up to date with the log files; only new or changed files are read.
+
+    pull: also fetch from the other machines (True), only when the last fetch is older
+    than PULL_EVERY (None), or not at all (False)."""
     db = connect()
     files = log_files()
-    known = {r["path"]: (r["size"], r["mtime"]) for r in db.execute("SELECT path, size, mtime FROM files")}
+    known = {r["path"]: (r["size"], r["mtime"]) for r in db.execute("SELECT path, size, mtime FROM files")
+             if MACHINE_SEP not in r["path"]}
     todo = [(p, src, size, mtime) for p, (src, size, mtime) in files.items()
             if known.get(p) != (size, mtime) and (only is None or p in only)]
     gone = [p for p in known if p not in files]
@@ -735,7 +750,7 @@ def update_index(quiet: bool = False, only: list[str] | None = None) -> dict:
     started = time.time()
     total_bytes = sum(t[2] for t in todo) or 1
     done_bytes = 0
-    show = not quiet and total_bytes > 50_000_000
+    show = not quiet and total_bytes > 500_000_000
     prices = load_prices()
     if show:
         print(f"Kuakgan: reading {len(todo)} log files ({total_bytes / 1e9:.1f} GB) for the first time "
@@ -754,12 +769,173 @@ def update_index(quiet: bool = False, only: list[str] | None = None) -> dict:
             db.commit()
         if show and time.time() - last_print > 5:
             last_print = time.time()
-            print(f"  {done_bytes / total_bytes:.0%} ({n}/{len(todo)} files)", file=sys.stderr, flush=True)
+            print(f"  {done_bytes / 1e9:.1f} of {total_bytes / 1e9:.1f} GB read ({n} of {len(todo)} files)",
+                  file=sys.stderr, flush=True)
     db.commit()
     if show:
         print(f"  done in {time.time() - started:.0f} s", file=sys.stderr, flush=True)
+    answer = {"read": len(todo), "removed": len(gone), "files": len(files)}
+    machines = load_machines()
+    if machines and pull is not False:
+        answer["machines"] = {}
+        for m in machines:
+            last = db.execute("SELECT value FROM meta WHERE key = ?", (f"pulled:{m['name']}",)).fetchone()
+            if pull is None and last and time.time() - float(last[0]) < PULL_EVERY:
+                continue
+            result = answer["machines"][m["name"]] = pull_machine(db, m, quiet)
+            db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (f"error:{m['name']}", result.get("error", "")))
+            db.commit()
     db.close()
-    return {"read": len(todo), "removed": len(gone), "files": len(files)}
+    return answer
+
+
+# ---------- other machines ----------
+
+MACHINE_SEP = "::"  # index paths of other machines' files are NAME::PATH
+# Runs Kuakgan's own source on the other machine, sent over stdin, so nothing has to be
+# installed there. Written without quotes, which shells pass on differently.
+REMOTE_BOOT = ("import sys,json;d=json.loads(sys.stdin.read());ns=dict(__name__=d.get(chr(110)));"
+               "exec(d.get(chr(115)),ns);ns.get(d.get(chr(102)))(d)")
+
+
+def load_machines() -> list[dict]:
+    with contextlib.suppress(OSError, ValueError):
+        return json.loads(MACHINES_PATH.read_text(encoding="utf-8")).get("machines", [])
+    return []
+
+
+def save_machines(machines: list[dict]) -> None:
+    MACHINES_PATH.write_text(json.dumps({"machines": machines}, indent=2) + "\n", encoding="utf-8")
+
+
+def ssh_command(m: dict, remote: str) -> list[str]:
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new",
+           "-o", "ServerAliveInterval=15", "-C"]
+    if m.get("key"):
+        cmd += ["-i", m["key"]]
+    if m.get("port"):
+        cmd += ["-p", str(m["port"])]
+    host = f"{m['user']}@{m['address']}" if m.get("user") else m["address"]
+    return cmd + ["--", host, remote]
+
+
+def run_remote(m: dict, request: dict, python: str, timeout: float | None):
+    """Starts Kuakgan's source on machine m with `request`; returns the process, whose
+    stdout gives one JSON value per line."""
+    payload = json.dumps({"n": "kuakgan_remote", "s": (HERE / "kuakgan.py").read_text(encoding="utf-8"),
+                          "f": "remote", **request})
+    # While results stream in, nothing reads stderr, so it must not fill a pipe and stall.
+    proc = subprocess.Popen(ssh_command(m, f"{python} -c '{REMOTE_BOOT}'"), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE if request["action"] == "list" else subprocess.DEVNULL)
+    proc.stdin.write(payload.encode())
+    proc.stdin.close()
+    return proc
+
+
+def remote(request: dict) -> None:
+    """Runs on the other machine: lists its log files, or reads the ones asked for."""
+    out = sys.stdout
+    if request["action"] == "list":
+        out.write(json.dumps({"os": sys.platform, "files": log_files()}) + "\n")
+        return
+    prices = {k: tuple(v) for k, v in request["prices"].items()}
+    for path, source in request["paths"]:
+        _, result = parse_file((path, source, prices))
+        if not isinstance(result, str):
+            for sess in result:
+                sess["usage"] = [[h, mo, *v] for (h, mo), v in sess["usage"].items()]
+        out.write(json.dumps({"path": path, "result": result}) + "\n")
+        out.flush()
+
+
+def remote_python(m: dict) -> str | None:
+    """The Python command that works on machine m, found once and remembered."""
+    if m.get("python"):
+        return m["python"]
+    for python in ("python3", "python"):
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            done = subprocess.run(ssh_command(m, f"{python} -c 'import sys;print(sys.version_info[:2]>=(3,9))'"),
+                                  capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL)
+            if done.stdout.strip() == "True":
+                return python
+    return None
+
+
+def pull_machine(db: sqlite3.Connection, m: dict, quiet: bool = False) -> dict:
+    """Brings the index up to date with machine m's logs: lists them over SSH and reads
+    only new or changed files there, so only the results travel."""
+    name = m["name"]
+    python = remote_python(m)
+    if not python:
+        return {"online": False, "error": "no SSH connection, or no Python 3.9+ there"}
+    proc = run_remote(m, {"action": "list"}, python, 60)
+    try:
+        listing, err = proc.communicate(timeout=120)
+        listing = json.loads(listing.decode() or "null")
+    except (subprocess.TimeoutExpired, ValueError):
+        proc.kill()
+        return {"online": False, "error": "the machine did not answer in time"}
+    if not listing:
+        return {"online": False, "error": (err.decode(errors="replace").strip().splitlines() or ["no answer"])[-1]}
+    files = {f"{name}{MACHINE_SEP}{p}": tuple(v) for p, v in listing["files"].items()}
+    prefix = f"{name}{MACHINE_SEP}"
+    known = {r["path"]: (r["size"], r["mtime"]) for r in
+             db.execute("SELECT path, size, mtime FROM files WHERE substr(path, 1, ?) = ?", (len(prefix), prefix))}
+    todo = {k: v for k, v in files.items() if known.get(k) != (v[1], v[2])}
+    for k in [k for k in known if k not in files]:
+        store(db, k, "", 0, 0, [], name)
+        db.execute("DELETE FROM files WHERE path=?", (k,))
+    total = sum(v[1] for v in todo.values())
+    if todo and not quiet and total > 200_000_000:
+        print(f"Kuakgan: reading {len(todo)} log files ({total / 1e9:.1f} GB) on {name}; only the results "
+              f"come over the network.", file=sys.stderr, flush=True)
+    read = 0
+    if todo:
+        prices = {k: list(v) for k, v in load_prices().items()}
+        paths = [[k[len(prefix):], v[0]] for k, v in sorted(todo.items(), key=lambda kv: -kv[1][1])]
+        proc = run_remote(m, {"action": "parse", "paths": paths, "prices": prices}, python, None)
+        last = time.time()
+        for line in proc.stdout:
+            with contextlib.suppress(ValueError):
+                item = json.loads(line)
+                result = item["result"]
+                if not isinstance(result, str):
+                    for sess in result:
+                        sess["usage"] = {(h, mo): v for h, mo, *v in sess["usage"]}
+                key = prefix + item["path"]
+                src, size, mtime = todo[key]
+                store(db, key, src, size, mtime, result, name)
+                read += 1
+                if read % 50 == 0:
+                    db.commit()
+                if not quiet and total > 200_000_000 and time.time() - last > 10:
+                    last = time.time()
+                    print(f"  {name}: {read} of {len(todo)} files", file=sys.stderr, flush=True)
+        proc.stdout.close()
+        if proc.wait() != 0 and read < len(todo):
+            db.commit()
+            return {"online": True, "read": read, "files": len(files),
+                    "error": f"stopped after {read} of {len(todo)} files; the rest is read next time"}
+    db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (f"pulled:{name}", str(time.time())))
+    db.commit()
+    return {"online": True, "read": read, "files": len(files)}
+
+
+def machines_status() -> list[dict]:
+    db = connect()
+    rows = {r["machine"]: dict(r) for r in db.execute(
+        "SELECT machine, COUNT(*) sessions, MAX(last_ts) last_ts FROM sessions GROUP BY machine")}
+    pulled = {r["key"][7:]: float(r["value"]) for r in db.execute("SELECT key, value FROM meta WHERE key LIKE 'pulled:%'")}
+    errors = {r["key"][6:]: r["value"] for r in db.execute("SELECT key, value FROM meta WHERE key LIKE 'error:%'")}
+    db.close()
+    out = []
+    for m in load_machines():
+        r = rows.get(m["name"], {})
+        out.append({"name": m["name"], "address": m["address"], "sessions": r.get("sessions", 0),
+                    "last_fetched": datetime.fromtimestamp(pulled[m["name"]], timezone.utc).isoformat(timespec="seconds")
+                    if m["name"] in pulled else None, **({"error": errors[m["name"]]} if errors.get(m["name"]) else {})})
+    return out
 
 
 # ---------- answers ----------
@@ -958,36 +1134,70 @@ def summary(days=30, project=None, sessions_limit=10) -> dict:
         f"tokens, SUM(u.output) output, SUM(u.cost) cost FROM usage u, sessions s WHERE {uw} "
         f"GROUP BY day, u.model ORDER BY day", up).fetchall()
     projects = [dict(r) for r in db.execute(
-        f"SELECT project, COUNT(*) sessions, SUM(input + cache_read + cache_write + output) tokens, "
-        f"SUM(cost) cost, SUM(calls) calls, MAX(last_ts) last_ts, "
-        f"GROUP_CONCAT(DISTINCT source) sources FROM sessions s WHERE {w} "
-        f"GROUP BY project ORDER BY cost DESC, tokens DESC LIMIT 25", params)]
+        f"SELECT s.project, COUNT(DISTINCT s.id) sessions, "
+        f"SUM(u.input + u.cache_read + u.cache_write + u.output) tokens, SUM(u.cost) cost, "
+        f"MAX(s.last_ts) last_ts, GROUP_CONCAT(DISTINCT s.source) sources, "
+        f"GROUP_CONCAT(DISTINCT s.machine) machines FROM usage u, sessions s WHERE {uw} "
+        f"GROUP BY s.project ORDER BY cost DESC, tokens DESC LIMIT 25", up)]
     for p in projects:
         p["cost"] = r2(p["cost"])
     top = [session_row(r) for r in db.execute(
         f"SELECT * FROM sessions s WHERE {w} ORDER BY cost DESC, (input + cache_read + output) DESC "
         f"LIMIT ?", params + [sessions_limit])]
+    machines = [dict(r) for r in db.execute(
+        f"SELECT s.machine, COUNT(DISTINCT s.id) sessions, SUM(u.input + u.cache_read + u.cache_write + u.output) "
+        f"tokens, SUM(u.cost) cost FROM usage u, sessions s WHERE {uw} GROUP BY s.machine "
+        f"ORDER BY tokens DESC", up)]
+    for m in machines:
+        m["machine"] = m["machine"] or "this computer"
+        m["cost"] = r2(m["cost"])
     findings = summarize_findings(db, days, project)
     db.close()
-    tokens = sum((t[k] or 0) for k in ("input", "cache_read", "cache_write", "output"))
+    sums = {k: sum(m[k] or 0 for m in models) for k in ("input", "cache_read", "cache_write", "output",
+                                                         "requests", "tokens")}
+    cost = sum(m["cost"] or 0 for m in models if m["priced"])
+    unpriced = sum(m["tokens"] for m in models if not m["priced"])
+    tokens = sums["tokens"]
     wasted_calls = sum(f["calls"] for f in findings if f["kind"] != "big_outputs")
     return {
         "period_days": days, "project": project,
-        "totals": {"sessions": t["sessions"], "tokens": tokens, "input": t["input"] or 0,
-                   "cache_read": t["cache_read"] or 0, "cache_write": t["cache_write"] or 0,
-                   "output": t["output"] or 0, "model_calls": t["requests"] or 0,
+        "totals": {"sessions": t["sessions"], "tokens": tokens, "input": sums["input"],
+                   "cache_read": sums["cache_read"], "cache_write": sums["cache_write"],
+                   "output": sums["output"], "model_calls": sums["requests"],
                    "tool_calls": t["calls"] or 0, "failed_tool_calls": t["errors"] or 0,
-                   "prompts": t["user_msgs"] or 0, "cost": r2(t["cost"] or 0),
-                   "tokens_without_price": t["unpriced"] or 0,
+                   "prompts": t["user_msgs"] or 0, "cost": r2(cost),
+                   "tokens_without_price": unpriced,
                    "wasted_tool_calls": wasted_calls,
                    "waste_share": round(wasted_calls / (t["calls"] or 1), 3),
                    "waste_cost": r2(sum(f["cost"] or 0 for f in findings if f["kind"] != "big_outputs"))},
-        "cost_note": "Estimated at API list prices; on a subscription you pay a flat fee instead.",
+        "cost_note": "Estimated at API list prices; on a subscription you pay a flat fee instead."
+                     + (f" Leaves out {unpriced:,} tokens from models without a known price "
+                        f"(add them in prices.json)." if unpriced else "")
+                     + " Tokens and cost count the model calls made in the period; sessions, tool "
+                       "calls and waste count the sessions active in it.",
         "models": models,
+        "machines": machines,
         "days": [dict(r) for r in days_rows],
         "projects": projects,
         "top_sessions": top,
         "findings": findings,
+    }
+
+
+def brief(answer: dict) -> dict:
+    """The main points of a summary, small enough for an agent to read whole."""
+    keep = lambda d, keys: {k: d[k] for k in keys if k in d}
+    return {
+        **keep(answer, ("period_days", "project", "totals", "cost_note")),
+        "models": [keep(m, ("model", "source", "tokens", "output", "requests", "cost")) for m in answer["models"][:8]],
+        "projects": [keep(p, ("project", "sessions", "tokens", "cost")) for p in answer["projects"][:8]],
+        "machines": answer["machines"],
+        "top_sessions": [keep(s, ("id", "project", "title", "source", "calls", "tokens", "cost", "last_ts"))
+                         for s in answer["top_sessions"][:5]],
+        "findings": [{**keep(f, ("kind", "title", "sessions", "calls", "share_of_calls", "cost", "tokens", "fix")),
+                      **({"repeated": f["repeated"][:3]} if f.get("repeated") else {})}
+                     for f in answer["findings"]],
+        "more": "Run `summary --full` for every day, all projects and where each finding happened.",
     }
 
 
@@ -1140,7 +1350,14 @@ def app_browser() -> str | None:
     return next((p for p in candidates if p and os.path.exists(p)), None)
 
 
+def has_screen() -> bool:
+    return sys.platform in ("win32", "darwin") or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def open_window(url: str) -> None:
+    if not has_screen():
+        print(f"No screen here to open a window on; open {url} in a browser.", flush=True)
+        return
     browser = app_browser()
     if browser:
         with contextlib.suppress(OSError):
@@ -1171,7 +1388,7 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
             parsed = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             if parsed.path == "/data.json":
-                update_index(quiet=True)
+                update_index(quiet=True, pull=None)
                 days = float(q.get("days") or 30) or None
                 body = json.dumps(summary(days, q.get("project") or None, 25)).encode()
                 kind = "application/json"
@@ -1190,6 +1407,18 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self):
+            # Only `kuakgan dashboard --stop` sends this header; a web page cannot without
+            # the browser asking first, so other pages cannot stop the dashboard.
+            if (self.headers.get("Host") not in allowed_hosts or urlparse(self.path).path != "/stop"
+                    or self.headers.get("X-Kuakgan") != "stop"):
+                self.send_error(403)
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Kuakgan dashboard stopped")
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+
         def log_message(self, *args):
             pass
 
@@ -1205,7 +1434,7 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
                 open_window(url)
             return
         sys.exit(f"Cannot start the dashboard on port {port}: {error}. Try another port with --port.")
-    update_index()
+    update_index(pull=None)
     print(f"Kuakgan dashboard on {url} (Ctrl+C to stop)", flush=True)
     if open_browser:
         open_window(url)
@@ -1213,6 +1442,32 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def start_in_background(port: int, open_browser: bool) -> int:
+    """Starts the dashboard detached from this shell, so it outlives the agent's
+    command (a plain `cmd &` is often killed with the shell that started it)."""
+    url = f"http://127.0.0.1:{port}/"
+    if dashboard_answers(url):
+        print(f"Kuakgan dashboard is already running on {url}")
+        if open_browser:
+            open_window(url)
+        return 0
+    update_index(pull=None)  # the first read can take minutes; do it here, where progress shows
+    cmd = [sys.executable, str(HERE / "kuakgan.py"), "dashboard", "--port", str(port), "--no-browser"]
+    options = ({"creationflags": 0x00000008 | 0x00000200}  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+               if sys.platform == "win32" else {"start_new_session": True})
+    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     close_fds=True, **options)
+    for _ in range(120):
+        if dashboard_answers(url):
+            print(f"Kuakgan dashboard on {url}; stop it with `kuakgan dashboard --stop`.")
+            if open_browser:
+                open_window(url)
+            return 0
+        time.sleep(0.5)
+    print(f"The dashboard did not answer on {url}; run `kuakgan dashboard` to see why.")
+    return 1
 
 
 # ---------- command line ----------
@@ -1225,7 +1480,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--days", type=float, default=days, help=f"look back this many days (default {days}; 0 = all)")
         p.add_argument("--project", help="only this project (its folder name or full path)")
 
-    scope(sub.add_parser("summary", help="tokens, cost, models, projects and waste, as JSON"), 30)
+    p = sub.add_parser("summary", help="tokens, cost, models, projects and waste, as JSON")
+    scope(p, 30)
+    p.add_argument("--full", action="store_true", help="everything the dashboard shows, not just the main points")
     scope(sub.add_parser("findings", help="waste patterns with fixes, as JSON"), 30)
     p = sub.add_parser("sessions", help="recent sessions, as JSON")
     scope(p, 7)
@@ -1234,11 +1491,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dir", default=".", help="the project folder (default: the current folder)")
     p.add_argument("--hook", action="store_true", help="short plain text, for a SessionStart hook")
     sub.add_parser("instructions", help="the block to add to CLAUDE.md or AGENTS.md")
+    p = sub.add_parser("machines", help="other computers whose logs to include (over SSH)")
+    msub = p.add_subparsers(dest="action")
+    q = msub.add_parser("add", help="add a machine and read its logs")
+    q.add_argument("name")
+    q.add_argument("address", help="host name or IP address, or a Host alias from ~/.ssh/config")
+    q.add_argument("--user")
+    q.add_argument("--key", help="path to the SSH private key")
+    q.add_argument("--port", type=int)
+    q = msub.add_parser("remove", help="remove a machine and its sessions from the index")
+    q.add_argument("name")
     p = sub.add_parser("index", help="read new and changed logs now")
     p.add_argument("--rebuild", action="store_true", help="forget the index and read everything again")
     p = sub.add_parser("dashboard", help="open the dashboard in the browser")
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--stop", action="store_true", help="stop a running dashboard")
+    p.add_argument("--background", action="store_true",
+                   help="start it as a process of its own and return once it answers")
 
     args = parser.parse_args(argv)
     with contextlib.suppress(AttributeError, ValueError):  # consoles that cannot show every character
@@ -1246,10 +1516,11 @@ def main(argv: list[str] | None = None) -> int:
     out = lambda obj: print(json.dumps(obj, indent=2))
 
     if args.command in ("summary", "findings", "sessions"):
-        update_index()
+        update_index(pull=None)
         days = args.days or None
         if args.command == "summary":
-            out({**summary(days, args.project), "about": ABOUT})
+            answer = summary(days, args.project)
+            out({**(answer if args.full else brief(answer)), "about": ABOUT})
         elif args.command == "findings":
             db = connect()
             out({"findings": summarize_findings(db, days, args.project), "about": ABOUT})
@@ -1271,9 +1542,53 @@ def main(argv: list[str] | None = None) -> int:
             for suffix in ("", "-wal", "-shm"):
                 with contextlib.suppress(OSError):
                     Path(str(DB_PATH) + suffix).unlink()
-        out(update_index())
+        out(update_index(pull=True))
+    elif args.command == "machines":
+        machines = load_machines()
+        if args.action == "add":
+            if MACHINE_SEP in args.name or not args.name.strip():
+                sys.exit("Give the machine a short name without '::'.")
+            key = Path(args.key).expanduser().resolve().as_posix() if args.key else None
+            m = {k: v for k, v in {"name": args.name, "address": args.address, "user": args.user,
+                                   "key": key, "port": args.port}.items() if v is not None}
+            m["python"] = remote_python(m)
+            if not m["python"]:
+                out({"added": None, "error": f"Cannot reach {args.address} over SSH without a password, or "
+                     f"it has no Python 3.9+. Check with: ssh {args.address} python3 --version"})
+                return 1
+            save_machines([x for x in machines if x["name"] != args.name] + [m])
+            db = connect()
+            result = pull_machine(db, m)
+            db.close()
+            out({"added": args.name, **result})
+        elif args.action == "remove":
+            save_machines([x for x in machines if x["name"] != args.name])
+            db = connect()
+            prefix = f"{args.name}{MACHINE_SEP}"
+            for (path,) in db.execute("SELECT path FROM files WHERE substr(path, 1, ?) = ?",
+                                      (len(prefix), prefix)).fetchall():
+                store(db, path, "", 0, 0, [], args.name)
+                db.execute("DELETE FROM files WHERE path=?", (path,))
+            db.execute("DELETE FROM meta WHERE key = ?", (f"pulled:{args.name}",))
+            db.commit()
+            db.close()
+            out({"removed": args.name if any(x["name"] == args.name for x in machines) else None})
+        else:
+            out(machines_status())
     elif args.command == "dashboard":
-        serve_dashboard(args.port, not args.no_browser)
+        if args.stop:
+            import urllib.request
+            try:
+                request = urllib.request.Request(f"http://127.0.0.1:{args.port}/stop", data=b"",
+                                                 headers={"X-Kuakgan": "stop"})
+                with urllib.request.urlopen(request, timeout=5):
+                    print("Kuakgan dashboard stopped.")
+            except OSError:
+                print(f"No Kuakgan dashboard is running on port {args.port}.")
+        elif args.background:
+            return start_in_background(args.port, not args.no_browser)
+        else:
+            serve_dashboard(args.port, not args.no_browser)
     return 0
 
 

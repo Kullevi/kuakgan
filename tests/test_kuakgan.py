@@ -216,6 +216,45 @@ class KuakganTest(unittest.TestCase):
         json.dumps(s)  # the dashboard serves it as JSON
 
 
+class MachinesTest(unittest.TestCase):
+    """Another machine, played by this one: the SSH command is replaced by running
+    Python here, so the source travels over stdin exactly as it would over SSH."""
+
+    def setUp(self):
+        self.original = kuakgan.ssh_command
+        os.environ["KUAKGAN_MACHINES"] = str(TMP / "machines.json")
+        kuakgan.MACHINES_PATH = Path(os.environ["KUAKGAN_MACHINES"])
+
+        def local(machine, remote):
+            if kuakgan.REMOTE_BOOT in remote:
+                return [sys.executable, "-c", kuakgan.REMOTE_BOOT]
+            return [sys.executable, "-c", "import sys;print(sys.version_info[:2]>=(3,9))"]
+        kuakgan.ssh_command = local
+
+    def tearDown(self):
+        kuakgan.ssh_command = self.original
+
+    def test_add_pull_and_remove(self):
+        build_logs()
+        kuakgan.update_index(quiet=True)
+        self.assertEqual(kuakgan.main(["machines", "add", "twin", "example.invalid"]), 0)
+        db = kuakgan.connect()
+        rows = db.execute("SELECT id, parent FROM sessions WHERE machine = 'twin'").fetchall()
+        self.assertEqual({r["id"] for r in rows}, {"twin:s1", "twin:s2", "twin:s2/agent-abc", "twin:codex-1"})
+        self.assertIn("twin:s2", {r["parent"] for r in rows})
+        machines = {m["machine"]: m for m in kuakgan.summary(days=30)["machines"]}
+        self.assertEqual(machines["twin"]["tokens"], machines["this computer"]["tokens"])
+        # A mistake made on both machines now counts as made in four sessions.
+        self.assertEqual(kuakgan.repeated_failures(db, 30, None)[0]["sessions"], 4)
+        # Nothing changed there, so nothing is read again.
+        self.assertEqual(kuakgan.pull_machine(db, kuakgan.load_machines()[0], quiet=True)["read"], 0)
+        db.close()
+        kuakgan.main(["machines", "remove", "twin"])
+        db = kuakgan.connect()
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions WHERE machine = 'twin'").fetchone()[0], 0)
+        self.assertEqual(kuakgan.load_machines(), [])
+
+
 class ClassifyTest(unittest.TestCase):
     def kind(self, cmd):
         return kuakgan.classify_command(cmd)[0]

@@ -5,3 +5,5 @@ __pycache__/
 .kuakgan.db
 .kuakgan.db-*
 prices.json
+# the list of other machines (local)
+kuakgan.json
