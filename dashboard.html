@@ -1,0 +1,404 @@
+<!doctype html>
+<!-- Kuakgan dashboard: tokens and cost over time, models, projects, waste with fixes,
+     and a card to share. Served by `kuakgan.py dashboard` on localhost; reads /data.json. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kuakgan</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<style>
+:root {
+  --page: #f3f4f7; --card: #ffffff; --line: #e5e7eb; --line-strong: #d1d5db;
+  --text: #111418; --text-2: #3f4650; --text-3: #6b7380; --track: #eceef2;
+  --accent: #0f9d6b; --accent-soft: #e6f6ef; --amber: #b86e00; --amber-soft: #fdf4e3;
+  --red: #c42b2b; --red-soft: #fdecec;
+  --gap: 14px; --pad: 18px;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --page: #0f1115; --card: #171a20; --line: #262a33; --line-strong: #353a45;
+    --text: #eef0f3; --text-2: #c3c8d0; --text-3: #8b929d; --track: #232731;
+    --accent: #2fd08b; --accent-soft: #12291f; --amber: #f0a43a; --amber-soft: #2b2112;
+    --red: #f06a6a; --red-soft: #2c1616; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--text); }
+body { font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased; padding: var(--pad); max-width: 1500px; margin: 0 auto; }
+.num { font-variant-numeric: tabular-nums; }
+h1, h2, h3 { font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif; letter-spacing: -.01em; }
+
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: var(--gap); }
+header img { width: 34px; height: 34px; }
+header h1 { margin: 0; font-size: 24px; font-weight: 700; }
+header .sub { color: var(--text-3); }
+header .spacer { flex: 1; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.seg { display: inline-flex; background: var(--track); border-radius: 9px; padding: 3px; }
+.seg button { border: 0; background: none; color: var(--text-2); font: inherit; font-weight: 600; padding: 5px 11px; border-radius: 7px; cursor: pointer; }
+.seg button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+select, .btn { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 10px; }
+.btn { cursor: pointer; font-weight: 600; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+label.toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); cursor: pointer; user-select: none; }
+
+.grid { display: grid; gap: var(--gap); grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
+  box-shadow: 0 1px 2px rgba(16,24,40,.04), 0 3px 10px rgba(16,24,40,.04); min-width: 0; }
+.card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); font-weight: 650; }
+.span-12 { grid-column: span 12; } .span-8 { grid-column: span 8; } .span-6 { grid-column: span 6; }
+.span-4 { grid-column: span 4; } .span-3 { grid-column: span 3; }
+@media (max-width: 1100px) { .span-8, .span-6, .span-4 { grid-column: span 12; } .span-3 { grid-column: span 6; } }
+@media (max-width: 600px) { .span-3 { grid-column: span 12; } body { padding: 12px; } }
+
+.kpi .k { color: var(--text-3); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; font-weight: 650; }
+.kpi .v { font: 700 30px/1.1 "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; margin-top: 6px; letter-spacing: -.02em; }
+.kpi .s { color: var(--text-3); font-size: 12.5px; margin-top: 4px; }
+.kpi.waste .v { color: var(--amber); }
+
+.chart-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.chart-head h2 { margin: 0; }
+svg text { fill: var(--text-3); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 12.5px; color: var(--text-2); }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--c); margin-right: 6px; vertical-align: -1px; }
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; color: var(--text-3); font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; font-weight: 650; padding: 0 8px 8px 0; }
+td { padding: 7px 8px 7px 0; border-top: 1px solid var(--line); vertical-align: top; }
+td.r, th.r { text-align: right; }
+td .muted, .muted { color: var(--text-3); }
+.bar { height: 6px; background: var(--track); border-radius: 3px; margin-top: 5px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
+
+.finding { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 10px; }
+.finding:first-of-type { margin-top: 0; }
+.finding .top { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.finding h3 { margin: 0; font-size: 17px; }
+.finding .stats { color: var(--text-2); }
+.finding .stats b { color: var(--amber); }
+.finding .what { color: var(--text-2); margin: 6px 0 0; }
+.fix { background: var(--accent-soft); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+.fix b { color: var(--accent); }
+.fix code, .finding code { font: 12.5px/1.4 ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--track); padding: 1px 5px; border-radius: 5px; word-break: break-all; }
+details { margin-top: 8px; color: var(--text-2); }
+summary { cursor: pointer; color: var(--text-3); font-weight: 600; }
+details ul { margin: 8px 0 0; padding-left: 18px; }
+details li { margin: 4px 0; }
+
+.share { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.share canvas { width: 100%; max-width: 640px; height: auto; border-radius: 12px; border: 1px solid var(--line); }
+.share .side { flex: 1; min-width: 220px; color: var(--text-2); }
+.share .side .btn { margin: 6px 6px 0 0; }
+
+.empty { color: var(--text-3); padding: 20px 0; }
+.loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--page); color: var(--text-2); font-size: 15px; z-index: 5; text-align: center; }
+.private .name { filter: blur(6px); }
+footer { color: var(--text-3); font-size: 12.5px; margin: 18px 0 4px; text-align: center; }
+footer a { color: var(--text-2); }
+</style>
+</head>
+<body>
+<div class="loading" id="loading"><div>Reading your Claude Code and Codex logs…<br><span class="muted">The first time can take a few minutes; after that it is quick.</span></div></div>
+<header>
+  <img src="/logo.svg" alt="">
+  <div><h1>Kuakgan</h1><div class="sub">Where your agents' tokens go, and what they waste</div></div>
+  <div class="spacer"></div>
+  <div class="controls">
+    <div class="seg" id="period">
+      <button data-days="7">7 days</button><button data-days="30" class="on">30 days</button>
+      <button data-days="90">90 days</button><button data-days="0">All</button>
+    </div>
+    <select id="project"><option value="">All projects</option></select>
+    <label class="toggle"><input type="checkbox" id="private"> Hide names</label>
+  </div>
+</header>
+
+<div class="grid" id="kpis"></div>
+
+<div class="grid" style="margin-top: var(--gap)">
+  <div class="card span-8">
+    <div class="chart-head"><h2>Tokens per day, by model</h2>
+      <div class="seg" id="metric"><button data-m="tokens" class="on">Tokens</button><button data-m="cost">Cost</button><button data-m="output">Output</button></div></div>
+    <div id="chart"></div><div class="legend" id="legend"></div>
+  </div>
+  <div class="card span-4"><h2>Models</h2><div id="models"></div></div>
+
+  <div class="card span-12"><h2>Waste, and how to fix it</h2><div id="findings"></div></div>
+
+  <div class="card span-6"><h2>Projects</h2><div id="projects"></div></div>
+  <div class="card span-6"><h2>Most expensive sessions</h2><div id="sessions"></div></div>
+
+  <div class="card span-12"><h2>Share</h2>
+    <div class="share">
+      <canvas id="card" width="1200" height="675"></canvas>
+      <div class="side">
+        <p>A card with your numbers, to post. It shows totals only: no project or session names.</p>
+        <button class="btn primary" id="download">Download image</button>
+        <button class="btn" id="copy">Copy image</button>
+        <p class="muted" id="copied"></p>
+      </div>
+    </div>
+  </div>
+</div>
+<footer>Everything here is read from this computer's own logs; nothing leaves it.
+Costs are estimates at API list prices. Open source, by the team behind <a href="https://kullevi.com" target="_blank" rel="noopener">Kullevi</a>.</footer>
+
+<script>
+const PALETTE = ["#0f9d6b", "#d97706", "#2563eb", "#9333ea", "#db2777", "#0891b2", "#65a30d", "#dc2626", "#7c3aed", "#ca8a04"];
+const state = { days: 30, project: "", metric: "tokens", data: null };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function fmt(n) {
+  if (n == null) return "–";
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(a >= 1e10 ? 0 : 1) + "B";
+  if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M";
+  if (a >= 1e3) return (n / 1e3).toFixed(a >= 1e4 ? 0 : 1) + "k";
+  return String(Math.round(n));
+}
+function money(n) {
+  if (n == null) return "–";
+  if (n >= 1000) return "$" + Math.round(n).toLocaleString("en-US");
+  if (n >= 10) return "$" + n.toFixed(0);
+  return "$" + n.toFixed(2);
+}
+const pct = (x) => (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
+function ago(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+
+async function load() {
+  const q = new URLSearchParams({ days: state.days });
+  if (state.project) q.set("project", state.project);
+  const res = await fetch("/data.json?" + q);
+  state.data = await res.json();
+  $("loading").style.display = "none";
+  render();
+}
+
+function render() {
+  const d = state.data, t = d.totals;
+  const periodText = d.period_days ? `last ${d.period_days} days` : "all time";
+  const kpi = (k, v, s, cls = "") => `<div class="card span-3 kpi ${cls}"><div class="k">${k}</div><div class="v num">${v}</div><div class="s">${s}</div></div>`;
+  $("kpis").innerHTML =
+    kpi("Tokens", fmt(t.tokens), `${fmt(t.output)} written by the models · ${periodText}`) +
+    kpi("Estimated cost", money(t.cost), t.tokens_without_price ? `plus ${fmt(t.tokens_without_price)} tokens without a known price` : "at API list prices") +
+    kpi("Sessions", fmt(t.sessions), `${fmt(t.prompts)} prompts · ${fmt(t.tool_calls)} tool calls`) +
+    kpi("Wasted steps", pct(t.waste_share), `${fmt(t.wasted_tool_calls)} tool calls${t.waste_cost ? ` · about ${money(t.waste_cost)}` : ""}`, "waste");
+
+  const sel = $("project");
+  if (sel.options.length <= 1 || !state.project) {
+    const cur = state.project;
+    sel.innerHTML = `<option value="">All projects</option>` + d.projects.map((p) => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join("");
+    sel.value = cur;
+  }
+  renderChart(); renderModels(); renderFindings(); renderProjects(); renderSessions(); drawCard();
+}
+
+function modelColors() {
+  const totals = {};
+  for (const r of state.data.days) totals[r.model] = (totals[r.model] || 0) + r.tokens;
+  const order = Object.keys(totals).sort((a, b) => totals[b] - totals[a]);
+  const colors = {};
+  order.forEach((m, i) => colors[m] = i < PALETTE.length - 1 ? PALETTE[i] : "#9ca3af");
+  return { order, colors };
+}
+
+function renderChart() {
+  const rows = state.data.days, m = state.metric;
+  if (!rows.length) { $("chart").innerHTML = `<div class="empty">No sessions in this period.</div>`; $("legend").innerHTML = ""; return; }
+  const { order, colors } = modelColors();
+  const days = [...new Set(rows.map((r) => r.day))].sort();
+  const first = new Date(days[0] + "T00:00:00Z"), last = new Date(days[days.length - 1] + "T00:00:00Z");
+  const all = [];
+  for (let x = new Date(first); x <= last; x.setUTCDate(x.getUTCDate() + 1)) all.push(x.toISOString().slice(0, 10));
+  const val = (r) => (m === "cost" ? r.cost || 0 : m === "output" ? r.output : r.tokens);
+  const stack = {}; all.forEach((day) => stack[day] = {});
+  rows.forEach((r) => { if (stack[r.day]) stack[r.day][r.model] = (stack[r.day][r.model] || 0) + val(r); });
+  const max = Math.max(...all.map((day) => Object.values(stack[day]).reduce((a, b) => a + b, 0)), 1e-9);
+  const W = 900, H = 260, L = 48, B = 22, T = 8;
+  const bw = (W - L) / all.length;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Usage per day">`;
+  for (let i = 0; i <= 4; i++) {
+    const y = T + (H - B - T) * (1 - i / 4);
+    svg += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--line)" />`;
+    svg += `<text x="${L - 6}" y="${y + 4}" text-anchor="end">${m === "cost" ? money(max * i / 4) : fmt(max * i / 4)}</text>`;
+  }
+  all.forEach((day, i) => {
+    let y = H - B;
+    for (const model of order) {
+      const v = stack[day][model] || 0;
+      if (!v) continue;
+      const h = (H - B - T) * v / max;
+      y -= h;
+      svg += `<rect x="${L + i * bw + bw * 0.12}" y="${y}" width="${Math.max(bw * 0.76, 1)}" height="${h}" fill="${colors[model]}" rx="${Math.min(2, bw / 6)}"><title>${day} · ${esc(model)}: ${m === "cost" ? money(v) : fmt(v)}</title></rect>`;
+    }
+    const step = Math.ceil(all.length / 10);
+    if (i % step === 0) svg += `<text x="${L + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">${day.slice(5)}</text>`;
+  });
+  $("chart").innerHTML = svg + "</svg>";
+  $("legend").innerHTML = order.map((mo) => `<span style="--c:${colors[mo]}">${esc(mo)}</span>`).join("");
+}
+
+function renderModels() {
+  const ms = state.data.models;
+  if (!ms.length) { $("models").innerHTML = `<div class="empty">No model calls.</div>`; return; }
+  const { colors } = modelColors();
+  const max = Math.max(...ms.map((x) => x.tokens), 1);
+  $("models").innerHTML = `<table><tr><th>Model</th><th class="r">Tokens</th><th class="r">Cost</th></tr>` +
+    ms.map((x) => `<tr><td><span style="color:${colors[x.model] || "inherit"}">●</span> ${esc(x.model)} <span class="muted">${x.source}</span>
+      <div class="bar"><i style="width:${100 * x.tokens / max}%; background:${colors[x.model] || "var(--accent)"}"></i></div>
+      <div class="muted">${fmt(x.requests)} calls · ${fmt(x.cache_read)} from cache · ${fmt(x.output)} written</div></td>
+      <td class="r num">${fmt(x.tokens)}</td><td class="r num">${x.priced ? money(x.cost) : '<span class="muted">no price</span>'}</td></tr>`).join("") + `</table>`;
+}
+
+function fixHtml(f) {
+  const names = { claude: "Claude Code", codex: "Codex" };
+  const srcs = Object.keys(f.fix);
+  const same = srcs.length > 1 && new Set(Object.values(f.fix)).size === 1;
+  if (srcs.length === 1 || same) return `<div class="fix"><b>Fix.</b> ${md(f.fix[srcs[0]])}</div>`;
+  return srcs.map((s) => `<div class="fix"><b>Fix in ${names[s] || s}.</b> ${md(f.fix[s])}</div>`).join("");
+}
+const md = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+
+function worstHtml(f) {
+  if (f.kind === "failures" && f.repeated && f.repeated.length) {
+    return `<details><summary>Mistakes made in more than one session</summary><ul>` + f.repeated.map((r) =>
+      `<li><code>${esc(r.failed.slice(0, 140))}</code> failed ${r.times} times in ${r.sessions} sessions` +
+      (r.worked_instead ? `; <code>${esc(r.worked_instead.slice(0, 140))}</code> worked` : "") + `</li>`).join("") + `</ul></details>`;
+  }
+  if (f.kind === "scripts") {
+    return `<details><summary>Scripts written most often</summary><ul>` + f.worst.map((g) =>
+      `<li>${g.times}× ${esc(g.language)} in <span class="name">${esc(g.projects.join(", "))}</span>: <code>${esc(g.start.slice(0, 120))}</code></li>`).join("") + `</ul></details>`;
+  }
+  return `<details><summary>Where it happened most</summary><ul>` + f.worst.map((w) => {
+    const d = w.detail || {};
+    let ex = "";
+    if (f.kind === "polling") ex = ` · ${d.repeats} checks in a row, such as <code>${esc(String(d.example).slice(0, 110))}</code>`;
+    if (f.kind === "rereads") ex = " · " + (d.files || []).slice(0, 3).map((x) => `<code>${esc(x.path.split("/").pop())}</code> ${x.reads}×`).join(", ");
+    if (f.kind === "big_outputs") ex = " · " + (d.examples || []).slice(0, 2).map((x) => `<code>${esc(String(x.text).slice(0, 80))}</code> ${fmt(x.tokens)} tokens`).join(", ");
+    return `<li><span class="name">${esc(w.project)} · ${esc((w.title || "").slice(0, 60))}</span>: ${w.calls} calls${w.cost ? ", " + money(w.cost) : ""}${ex}</li>`;
+  }).join("") + `</ul></details>`;
+}
+
+function renderFindings() {
+  const fs = state.data.findings;
+  if (!fs.length) { $("findings").innerHTML = `<div class="empty">Nothing wasteful found in this period.</div>`; return; }
+  $("findings").innerHTML = fs.map((f) => {
+    const stats = f.kind === "big_outputs"
+      ? `<b>${fmt(f.calls)}</b> results, ${fmt(f.tokens)} tokens in ${f.sessions} sessions`
+      : `<b>${fmt(f.calls)}</b> tool calls (${pct(f.share_of_calls)} of all) in ${f.sessions} sessions${f.cost ? ` · about <b>${money(f.cost)}</b>` : ""}`;
+    return `<div class="finding"><div class="top"><h3>${esc(f.title)}</h3><span class="stats">${stats}</span></div>
+      <p class="what">${md(f.what)}</p>${fixHtml(f)}${worstHtml(f)}</div>`;
+  }).join("");
+}
+
+function renderProjects() {
+  const ps = state.data.projects;
+  if (!ps.length) { $("projects").innerHTML = `<div class="empty">No projects.</div>`; return; }
+  const max = Math.max(...ps.map((p) => p.tokens), 1);
+  $("projects").innerHTML = `<table><tr><th>Project</th><th class="r">Sessions</th><th class="r">Tokens</th><th class="r">Cost</th></tr>` +
+    ps.slice(0, 12).map((p) => `<tr><td><span class="name">${esc(p.project)}</span> <span class="muted">${esc(p.sources)}</span>
+      <div class="bar"><i style="width:${100 * p.tokens / max}%"></i></div></td>
+      <td class="r num">${p.sessions}</td><td class="r num">${fmt(p.tokens)}</td><td class="r num">${money(p.cost)}</td></tr>`).join("") + `</table>`;
+}
+
+function renderSessions() {
+  const ss = state.data.top_sessions;
+  if (!ss.length) { $("sessions").innerHTML = `<div class="empty">No sessions.</div>`; return; }
+  $("sessions").innerHTML = `<table><tr><th>Session</th><th class="r">Tool calls</th><th class="r">Tokens</th><th class="r">Cost</th></tr>` +
+    ss.slice(0, 12).map((s) => `<tr><td><div class="ellipsis name">${esc(s.title || s.id)}</div>
+      <div class="muted"><span class="name">${esc(s.project)}</span> · ${s.source}${s.parent ? " subagent" : ""} · ${ago(s.last_ts)}</div></td>
+      <td class="r num">${fmt(s.calls)}</td><td class="r num">${fmt(s.tokens)}</td><td class="r num">${money(s.cost)}</td></tr>`).join("") + `</table>`;
+}
+
+// ---------- the share card ----------
+function drawCard() {
+  const d = state.data, t = d.totals, c = $("card"), g = c.getContext("2d");
+  const W = c.width, H = c.height, X = 72;
+  const bg = g.createLinearGradient(0, 0, W, H);
+  bg.addColorStop(0, "#0b2219"); bg.addColorStop(1, "#0f141b");
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  const font = (w, s) => `${w} ${s}px "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif`;
+  // Writes text at the largest size up to `size` that fits in `max` pixels.
+  const fit = (text, x, y, size, max, weight = 700) => {
+    let s = size;
+    do { g.font = font(weight, s); s -= 2; } while (g.measureText(text).width > max && s > 10);
+    g.fillText(text, x, y);
+  };
+  if (logoImg.complete && logoImg.naturalWidth) g.drawImage(logoImg, X, 52, 44, 44);
+  g.fillStyle = "#2fd08b"; fit("Kuakgan", X + 56, 86, 32, 300);
+  g.fillStyle = "#9aa3ad";
+  fit(d.period_days ? `My last ${d.period_days} days with AI coding agents` : "My AI coding agents, all time", X, 146, 28, W - 2 * X, 500);
+
+  g.fillStyle = "#ffffff";
+  fit(`${fmt(t.tokens)} tokens`, X, 236, 84, 560);
+  const stats = [[money(t.cost), "at API list prices", "#ffffff"], [fmt(t.tool_calls), "tool calls", "#ffffff"],
+                 [pct(t.waste_share), "of steps wasted", "#f0a43a"]];
+  stats.forEach(([v, k, color], i) => {
+    const x = X + i * 200;
+    g.fillStyle = color; fit(v, x, 320, 44, 185);
+    g.fillStyle = "#9aa3ad"; fit(k, x, 352, 20, 185, 500);
+  });
+
+  // Tokens per day, as small bars on the right.
+  const perDay = {};
+  for (const r of d.days) perDay[r.day] = (perDay[r.day] || 0) + r.tokens;
+  const days = Object.keys(perDay).sort().slice(-60);
+  if (days.length) {
+    const cx = 690, cw = W - X - cx, cy = 190, ch = 170, max = Math.max(...days.map((x) => perDay[x]));
+    const bw = cw / days.length;
+    days.forEach((day, i) => {
+      const h = Math.max(2, ch * perDay[day] / max);
+      g.fillStyle = "#2fd08b"; g.globalAlpha = 0.35 + 0.65 * (i + 1) / days.length;
+      g.fillRect(cx + i * bw + bw * 0.15, cy + ch - h, Math.max(bw * 0.7, 1), h);
+    });
+    g.globalAlpha = 1;
+    g.fillStyle = "#6b7380"; fit("tokens per day", cx, cy + ch + 30, 18, cw, 500);
+  }
+
+  const top = (d.findings || []).filter((f) => f.kind !== "big_outputs").slice(0, 3);
+  top.forEach((f, i) => {
+    const y = 440 + i * 46;
+    g.fillStyle = "#f0a43a"; g.font = font(700, 24); g.fillText("●", X, y);
+    g.fillStyle = "#e6e9ee"; fit(`${f.title}: ${fmt(f.calls)} tool calls${f.cost ? `, about ${money(f.cost)}` : ""}`, X + 34, y, 26, W - 2 * X - 34, 500);
+  });
+  g.fillStyle = "#6b7380";
+  fit([...new Set((d.models || []).slice(0, 3).map((m) => m.model))].join(" · "), X, H - 52, 20, 620, 500);
+  g.textAlign = "right"; fit("Kuakgan · open source, by the team behind Kullevi", W - X, H - 52, 20, 480, 500); g.textAlign = "left";
+}
+const logoImg = new Image();
+logoImg.onload = () => state.data && drawCard();
+logoImg.src = "/logo.svg?dark";
+
+$("download").onclick = () => {
+  const a = document.createElement("a");
+  a.download = "kuakgan.png"; a.href = $("card").toDataURL("image/png"); a.click();
+};
+$("copy").onclick = () => $("card").toBlob(async (blob) => {
+  try { await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]); $("copied").textContent = "Copied. Paste it into your post."; }
+  catch { $("copied").textContent = "Copying is not allowed here; use Download instead."; }
+});
+
+document.querySelectorAll("#period button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("#period button").forEach((x) => x.classList.toggle("on", x === b));
+  state.days = +b.dataset.days; load();
+});
+document.querySelectorAll("#metric button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("#metric button").forEach((x) => x.classList.toggle("on", x === b));
+  state.metric = b.dataset.m; renderChart();
+});
+$("project").onchange = (e) => { state.project = e.target.value; load(); };
+$("private").onchange = (e) => document.body.classList.toggle("private", e.target.checked);
+if (new URLSearchParams(location.search).has("private")) { $("private").checked = true; document.body.classList.add("private"); }
+load();
+setInterval(() => { if (!document.hidden) load(); }, 120000);
+</script>
+</body>
+</html>

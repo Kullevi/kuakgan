@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+# local index and price overrides
+.kuakgan.db
+.kuakgan.db-*
+prices.json

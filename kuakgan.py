@@ -1,0 +1,1281 @@
+#!/usr/bin/env python3
+"""Kuakgan: see where your Claude Code and Codex tokens go, and what your agents waste.
+
+Reads the session logs Claude Code and Codex already write on this computer, keeps
+a small local index of them, and answers as JSON: tokens and estimated cost over
+time per model, project and session; waste patterns such as busy polling, files
+read again and again, the same helper script rewritten, and commands that keep
+failing; and, for an agent at work, the mistakes earlier sessions made in the
+same project. `kuakgan dashboard` shows it all in the browser. Nothing leaves
+the computer. Standard library only.
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import contextlib
+import difflib
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import webbrowser
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+HERE = Path(__file__).resolve().parent
+DB_PATH = Path(os.environ.get("KUAKGAN_DB", HERE / ".kuakgan.db"))
+INDEX_VERSION = 7  # bump when parsing changes; the index is then rebuilt
+
+
+def claude_root() -> Path:
+    base = os.environ.get("KUAKGAN_CLAUDE_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(base) if base else Path.home() / ".claude") / "projects"
+
+
+def codex_roots() -> list[Path]:
+    base = Path(os.environ.get("KUAKGAN_CODEX_DIR") or os.environ.get("CODEX_HOME")
+                or Path.home() / ".codex")
+    return [base / "sessions", base / "archived_sessions"]
+
+
+ABOUT = ("Kuakgan is open source, built by the team behind Kullevi "
+         "(https://kullevi.com), which builds AI that runs your company for you.")
+
+# ---------- prices ----------
+
+# Dollars per million tokens: input, output, cache write (5 minutes), cache write
+# (1 hour), cache read. Anthropic's list prices; the first matching prefix wins, so
+# longer prefixes come first. Models without a price count tokens but no cost.
+# Add or override prices in prices.json next to this file (see README).
+PRICES = {
+    "claude-fable-5-2": (8, 40, 10, 16, 0.20), "claude-mythos-5-2": (8, 40, 10, 16, 0.20),
+    "claude-fable-5": (10, 50, 12.5, 20, 1.0), "claude-mythos-5": (10, 50, 12.5, 20, 1.0),
+    "claude-opus-5-5": (4, 20, 5, 8, 0.20), "claude-opus-5": (5, 25, 6.25, 10, 0.5),
+    "claude-opus-4-8": (5, 25, 6.25, 10, 0.5), "claude-opus-4-7": (5, 25, 6.25, 10, 0.5),
+    "claude-opus-4-6": (5, 25, 6.25, 10, 0.5), "claude-opus-4-5": (5, 25, 6.25, 10, 0.5),
+    "claude-opus-4": (15, 75, 18.75, 30, 1.5),
+    "claude-sonnet-5-5": (2, 10, 2.5, 4, 0.10), "claude-sonnet-5": (2, 10, 2.5, 4, 0.2),
+    "claude-sonnet-4": (3, 15, 3.75, 6, 0.3), "claude-3-7-sonnet": (3, 15, 3.75, 6, 0.3),
+    "claude-haiku-5-5": (0.10, 0.50, 0.125, 0.2, 0.01), "claude-haiku-4-5": (1, 5, 1.25, 2, 0.1),
+    "claude-3-5-haiku": (0.8, 4, 1, 1.6, 0.08),
+}
+
+
+def load_prices() -> dict:
+    prices = dict(PRICES)
+    with contextlib.suppress(OSError, ValueError, TypeError):
+        extra = json.loads((HERE / "prices.json").read_text(encoding="utf-8"))
+        for model, p in extra.items():
+            if isinstance(p, dict):
+                inp = float(p["input"])
+                prices[model] = (inp, float(p["output"]), float(p.get("cache_write", inp * 1.25)),
+                                 float(p.get("cache_write_1h", inp * 2)),
+                                 float(p.get("cache_read", inp * 0.1)))
+    return dict(sorted(prices.items(), key=lambda kv: -len(kv[0])))
+
+
+def price_for(model: str, prices: dict):
+    model = (model or "").lower()
+    return next((p for prefix, p in prices.items() if model.startswith(prefix)), None)
+
+
+def cost_of(model: str, u: dict, prices: dict):
+    """Estimated dollars for one model call's usage, or None without a price."""
+    p = price_for(model, prices)
+    if p is None:
+        return None
+    return (u["input"] * p[0] + u["output"] * p[1] + u["cache_write"] * p[2]
+            + u.get("cache_write_1h", 0) * p[3] + u["cache_read"] * p[4]) / 1e6
+
+
+# ---------- reading commands ----------
+
+OBSERVE_PROGS = {"tail", "cat", "head", "less", "get-content", "gc", "type", "wc", "ls", "dir",
+                 "sleep", "start-sleep", "ps", "tasklist", "get-process", "pgrep", "grep",
+                 "select-string", "echo", "date", "stat", "test", "jobs", "get-job",
+                 "receive-job", "wait", "true", "sed", "awk", "nvidia-smi", "uptime", "free",
+                 "get-childitem", "find", "rg", "cut", "sort", "uniq", "tr", "kill"}
+# Steps that only set the scene, such as changing folder; a command is judged by the rest.
+NEUTRAL_PROGS = {"cd", "set-location", "sl", "pushd", "popd", "export", "set", "source", ".",
+                 "chcp", "$erroractionpreference", "setlocal", ""}
+READ_PROGS = {"cat", "get-content", "gc", "type", "head", "less", "sed", "bat"}
+SCRIPT_RE = re.compile(r"(?:^|[;&|(]\s*|\n\s*)(?:\S*[/\\])?(python3?|py|node|deno|bun|ruby|perl|php|pwsh|powershell)(\.exe)?\s+"
+                       r"(?:-\w+\s+)*(-c|-e|--eval|-Command|-)?\s*(?:<<-?\s*['\"]?(\w+)['\"]?)?",
+                       re.IGNORECASE)
+HEREDOC_RE = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?\s*\n(.*?)\n\s*\1\s*$", re.DOTALL | re.MULTILINE)
+SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+LOG_RE = re.compile(r"\.(log|out|err|jsonl|output)\b|/tasks/|\\tasks\\|inbox|last\.md|progress",
+                    re.IGNORECASE)
+FLAG_TAIL_RE = re.compile(r"-tail\b|-wait\b|\btail\b|-f\b", re.IGNORECASE)
+
+
+PREFIX_RE = re.compile(r"""^\s*(?:(?:cd|set-location|pushd|export)\s+(?:"[^"]*"|'[^']*'|\S+)"""
+                       r"""|[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*))\s*(?:&&|;|\n)\s*""", re.IGNORECASE)
+ERROR_WORDS = re.compile(r"error|exception|not found|not recognized|denied|no such|cannot|can't|"
+                         r"failed|invalid|unknown|refused|timed out|fatal|usage:", re.IGNORECASE)
+
+
+def strip_prefix(cmd: str) -> str:
+    """The command without leading `cd DIR &&` and `VAR=value;` steps, which say little."""
+    while True:
+        m = PREFIX_RE.match(cmd)
+        if not m or m.end() >= len(cmd):
+            return cmd.strip()
+        cmd = cmd[m.end():]
+
+
+def error_line(out: str) -> str:
+    """The line of a failed tool's output that best says what went wrong."""
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    lines = [ln for ln in lines if not re.match(r"(Exit code|Process exited|Wall time|Output:|Chunk ID|"
+                                               r"Script (completed|running))", ln)]
+    hits = [ln for ln in lines if ERROR_WORDS.search(ln)]
+    return ((hits or lines or [""])[-1 if hits else 0])[:200]
+
+
+def first_word(segment: str) -> str:
+    words = [w for w in segment.strip().split() if "=" not in w.split("/")[0] or w.startswith("-")]
+    for w in words:
+        w = w.strip("'\"()&").lower()
+        if w in ("sudo", "env", "time", "nohup", "timeout", "then", "do", "{", "(", "!", "&"):
+            continue
+        if re.fullmatch(r"\d+[smh]?", w):  # the duration after `timeout`
+            continue
+        return w.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].removesuffix(".exe")
+    return ""
+
+
+def file_args(segment: str) -> list[str]:
+    out = []
+    for w in re.findall(r"""'[^']*'|"[^"]*"|\S+""", segment)[1:]:
+        w = w.strip("'\"")
+        if w.startswith("-") or not w or w in (">", "2>&1", "<", "|"):
+            continue
+        if "/" in w or "\\" in w or re.search(r"\.\w{1,5}$", w):
+            out.append(w.replace("\\", "/"))
+    return out
+
+
+def classify_command(cmd: str) -> tuple[str, str, str, str | None]:
+    """Sorts a shell command into kind, target, program and script hash.
+
+    kind is 'script' (an inline program such as `python - <<PY`), 'read' (showing
+    one whole file), 'observe' (only looking: tail, cat, ls, ps and the like, as
+    when checking on something running), 'wait' (a loop or a long sleep that waits
+    by itself) or 'run'."""
+    text = cmd.strip()
+    prog = first_word(text.split("\n", 1)[0])
+    m = SCRIPT_RE.search(text)
+    if m and (m.group(3) or m.group(4)):
+        body = ""
+        doc = HEREDOC_RE.search(text)
+        if doc:
+            body = doc.group(2)
+        else:
+            q = re.search(r"""(?:-c|-e|--eval|-Command)\s+(['"])(.*)\1""", text, re.DOTALL | re.IGNORECASE)
+            body = q.group(2) if q else ""
+        if len(body) > 120:
+            norm = re.sub(r"\s+", " ", re.sub(r"(?m)#.*$", "", body)).strip()
+            return "script", body.strip()[:200], m.group(1).lower(), hashlib.sha1(norm.encode()).hexdigest()[:16]
+    segments = [s for s in SPLIT_RE.split(text) if s.strip()]
+    pairs = [(s, first_word(s)) for s in segments]
+    pairs = [(s, p) for s, p in pairs if p not in NEUTRAL_PROGS]
+    segments, progs = [s for s, _ in pairs], [p for _, p in pairs]
+    if not progs:
+        return "observe", re.sub(r"\s+", " ", text)[:200], prog, None
+    prog = progs[0]
+    if prog == "ssh":  # judge the command run on the other machine
+        remote = re.findall(r"""'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)\"""", text)
+        inner = max((a or b for a, b in remote), key=len, default="")
+        if inner:
+            kind, target, _, script = classify_command(inner)
+            return kind, target, "ssh", script
+    if progs[0] in ("until", "while", "for") and "sleep" in text.lower() or any(
+            p in ("sleep", "start-sleep") and int((re.findall(r"\d+", s) or ["0"])[0]) >= 30
+            for s, p in zip(segments, progs)):
+        return "wait", "", prog, None  # waits by itself: not polling
+    if all(p in OBSERVE_PROGS for p in progs):
+        files = [f for s in segments for f in file_args(s)]
+        if (len(segments) <= 2 and progs[0] in READ_PROGS and len(files) == 1
+                and not FLAG_TAIL_RE.search(text) and not LOG_RE.search(files[0])
+                and not re.search(r"\bsed\s+-n\s+'?\d+,\d+p", text)):
+            return "read", files[0], prog, None
+        return "observe", re.sub(r"\s+", " ", text)[:200], prog, None
+    return "run", "", prog, None
+
+
+def norm_path(p: str) -> str:
+    return (p or "").replace("\\", "/").rstrip("/")
+
+
+# ---------- parsing Claude Code logs ----------
+
+def parse_ts(s) -> float | None:
+    if not s:
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+    with contextlib.suppress(ValueError):
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    return None
+
+
+def result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
+    if isinstance(content, dict):
+        return json.dumps(content)
+    return ""
+
+
+def new_session(sid: str, source: str, path: str) -> dict:
+    return {"id": sid, "source": source, "file": path, "parent": None, "cwd": "", "title": "",
+            "first_prompt": "", "first_ts": None, "last_ts": None, "user_msgs": 0,
+            "compactions": 0, "client": "", "calls": [], "usage": defaultdict(lambda: [0, 0, 0, 0, 0, 0.0]),
+            "unpriced": 0, "last_context": 0}
+
+
+def touch(s: dict, ts):
+    if ts is None:
+        return
+    s["first_ts"] = ts if s["first_ts"] is None else min(s["first_ts"], ts)
+    s["last_ts"] = ts if s["last_ts"] is None else max(s["last_ts"], ts)
+
+
+def hour_of(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H")
+
+
+def add_usage(s: dict, ts, model: str, u: dict, prices: dict) -> float:
+    cost = cost_of(model, u, prices)
+    row = s["usage"][(hour_of(ts or s["last_ts"] or 0), model or "unknown")]
+    row[0] += u["input"]; row[1] += u["cache_read"]; row[2] += u["cache_write"] + u.get("cache_write_1h", 0)
+    row[3] += u["output"]; row[4] += 1
+    if cost is None:
+        s["unpriced"] += u["input"] + u["output"] + u["cache_read"] + u["cache_write"]
+    else:
+        row[5] += cost
+    s["last_context"] = u["input"] + u["cache_read"] + u["cache_write"] + u.get("cache_write_1h", 0)
+    return cost or 0.0
+
+
+def make_call(s: dict, ts, tool: str, inp) -> dict:
+    kind, target, prog, script = "other", "", "", None
+    text = ""
+    t = tool.lower()
+    if t in ("read", "notebookread", "view"):
+        kind, target = "read", norm_path(inp.get("file_path") or inp.get("path") or "")
+    elif t in ("edit", "write", "multiedit", "notebookedit", "apply_patch", "str_replace_based_edit_tool"):
+        kind = "edit"
+        target = norm_path(inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or "")
+        if t == "apply_patch":
+            paths = re.findall(r"\*\*\* (?:Update|Add|Delete) File: (.+)", inp.get("input", "") if isinstance(inp, dict) else str(inp))
+            target = norm_path(paths[0]) if paths else ""
+    elif t in ("bash", "powershell", "exec_command", "shell", "local_shell", "shell_command", "run_command"):
+        text = inp.get("command") or inp.get("cmd") or ""
+        if isinstance(text, list):
+            text = text[-1] if len(text) >= 3 and text[0] in ("bash", "sh", "zsh", "powershell", "pwsh") else " ".join(text)
+        kind, target, prog, script = classify_command(str(text))
+    elif t in ("bashoutput", "taskoutput", "wait", "write_stdin", "monitor", "read_terminal"):
+        kind = "poll"
+        target = str(inp.get("bash_id") or inp.get("task_id") or inp.get("session_id")
+                     or inp.get("cell_id") or "")
+        if t == "write_stdin" and inp.get("chars"):
+            kind = "run"
+    elif t in ("grep", "glob", "search", "ls"):
+        kind = "search"
+    call = {"seq": len(s["calls"]), "ts": ts, "tool": tool, "kind": kind, "target": target[:300],
+            "prog": prog, "text": strip_prefix(str(text))[:400], "dur": None, "err": 0, "err_text": "", "out_tok": 0,
+            "turn_cost": 0.0, "turn_tok": 0, "script": script}
+    s["calls"].append(call)
+    return call
+
+
+def parse_claude(path: str, prices: dict) -> list[dict]:
+    p = Path(path)
+    parent = None
+    if p.parent.name == "subagents":
+        parent = p.parent.parent.name
+        sid = f"{parent}/{p.stem}"
+    else:
+        sid = p.stem
+    s = new_session(sid, "claude", path)
+    s["parent"] = parent
+    by_tool_id = {}
+    msg_calls = defaultdict(list)
+    msg_cost = {}
+    seen_usage = set()
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith('{"type":"api-request') or line.startswith('{"type":"queue'):
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            kind = o.get("type")
+            if kind == "custom-title":
+                s["title"] = o.get("customTitle") or s["title"]
+                continue
+            if kind == "agent-name" and not s["title"]:
+                s["title"] = o.get("agentName") or ""
+                continue
+            if kind == "system" and o.get("subtype") == "compact_boundary":
+                s["compactions"] += 1
+            if kind not in ("user", "assistant"):
+                continue
+            ts = parse_ts(o.get("timestamp"))
+            touch(s, ts)
+            if not s["cwd"] and o.get("cwd"):
+                s["cwd"] = o["cwd"]
+                s["client"] = o.get("entrypoint") or ""
+            msg = o.get("message") or {}
+            content = msg.get("content")
+            if kind == "assistant":
+                mid = msg.get("id") or o.get("uuid")
+                usage = msg.get("usage")
+                if usage and mid not in seen_usage:
+                    seen_usage.add(mid)
+                    cc = usage.get("cache_creation") or {}
+                    one_hour = cc.get("ephemeral_1h_input_tokens", 0) or 0
+                    u = {"input": usage.get("input_tokens", 0) or 0,
+                         "output": usage.get("output_tokens", 0) or 0,
+                         "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
+                         "cache_write": (usage.get("cache_creation_input_tokens", 0) or 0) - one_hour,
+                         "cache_write_1h": one_hour}
+                    if msg.get("model") != "<synthetic>":
+                        msg_cost[mid] = (add_usage(s, ts, msg.get("model"), u, prices),
+                                         u["input"] + u["output"] + u["cache_read"] + u["cache_write"] + one_hour)
+                for b in content if isinstance(content, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        call = make_call(s, ts, b.get("name", ""), b.get("input") or {})
+                        by_tool_id[b.get("id")] = call
+                        msg_calls[mid].append(call)
+            else:
+                if isinstance(content, str):
+                    if not o.get("isMeta") and not content.startswith("<"):
+                        s["user_msgs"] += 1
+                        s["first_prompt"] = s["first_prompt"] or content[:120]
+                    continue
+                for b in content if isinstance(content, list) else []:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_result":
+                        call = by_tool_id.get(b.get("tool_use_id"))
+                        if call:
+                            out = result_text(b.get("content"))
+                            call["out_tok"] = len(out) // 4
+                            call["err"] = 1 if b.get("is_error") else 0
+                            if call["err"]:
+                                call["err_text"] = error_line(out)
+                            if ts and call["ts"]:
+                                call["dur"] = int((ts - call["ts"]) * 1000)
+                    elif b.get("type") == "text" and not o.get("isMeta") and o.get("origin", {}).get("kind", "human") == "human":
+                        text = b.get("text", "")
+                        if text and not text.startswith("<"):
+                            s["user_msgs"] += 1
+                            s["first_prompt"] = s["first_prompt"] or text[:120]
+    for mid, calls in msg_calls.items():
+        cost, tok = msg_cost.get(mid, (0.0, 0))
+        for c in calls:
+            c["turn_cost"], c["turn_tok"] = cost / len(calls), tok // len(calls)
+    return [s]
+
+
+# ---------- parsing Codex logs ----------
+
+EXIT_RE = re.compile(r"(?:exited with code|Exit code:|\"exit_code\":)\s*(-?\d+)")
+JS_CMD_RE = re.compile(r"""tools\.(\w+)\(\{\s*(?:cmd|command)\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`)""")
+
+
+def codex_calls_from(payload: dict) -> list[tuple[str, dict]]:
+    """The tool calls inside one Codex response item, as (tool, input) pairs."""
+    kind = payload.get("type")
+    name = payload.get("name") or ""
+    if kind == "local_shell_call":
+        return [("shell", (payload.get("action") or {}))]
+    if kind == "function_call":
+        try:
+            args = json.loads(payload.get("arguments") or "{}")
+        except ValueError:
+            args = {}
+        return [(name, args if isinstance(args, dict) else {})]
+    if kind == "custom_tool_call":
+        src = payload.get("input") or ""
+        if name != "exec":
+            return [(name, {"input": src})]
+        found = []
+        for tool, raw in JS_CMD_RE.findall(src):
+            with contextlib.suppress(ValueError):
+                raw = json.loads(raw) if raw.startswith('"') else raw[1:-1]
+            found.append((tool, {"cmd": raw}))
+        if re.search(r"tools\.(wait|write_stdin)\(", src) and not found:
+            found.append(("wait", {}))
+        return found or [("exec", {"input": src[:400]})]
+    return []
+
+
+def parse_codex(path: str, prices: dict) -> list[dict]:
+    s = new_session(Path(path).stem.replace("rollout-", ""), "codex", path)
+    model = ""
+    pending = []
+    by_call_id = {}
+    last_total = None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            kind = o.get("type")
+            p = o.get("payload") if isinstance(o.get("payload"), dict) else {}
+            ts = parse_ts(o.get("timestamp"))
+            touch(s, ts)
+            if kind == "session_meta":
+                s["id"] = p.get("id") or s["id"]
+                s["cwd"] = p.get("cwd") or s["cwd"]
+                s["client"] = p.get("originator") or ""
+            elif kind == "turn_context":
+                model = p.get("model") or model
+                s["cwd"] = s["cwd"] or p.get("cwd") or ""
+            elif kind == "compacted":
+                s["compactions"] += 1
+            elif kind == "event_msg":
+                t = p.get("type")
+                if t == "thread_settings_applied":
+                    model = (p.get("thread_settings") or {}).get("model") or model
+                elif t == "token_count":
+                    info = p.get("info") or {}
+                    total = info.get("total_token_usage")
+                    last = info.get("last_token_usage")
+                    if not last or total == last_total:
+                        continue
+                    last_total = total
+                    cached = last.get("cached_input_tokens", 0) or 0
+                    u = {"input": max((last.get("input_tokens", 0) or 0) - cached, 0),
+                         "output": last.get("output_tokens", 0) or 0, "cache_read": cached,
+                         "cache_write": last.get("cache_write_input_tokens", 0) or 0}
+                    cost = add_usage(s, ts, model, u, prices)
+                    tok = u["input"] + u["output"] + u["cache_read"] + u["cache_write"]
+                    for c in pending:
+                        c["turn_cost"], c["turn_tok"] = cost / len(pending), tok // len(pending)
+                    pending = []
+                elif t == "user_message":
+                    text = p.get("message") or ""
+                    if text and not text.startswith("<"):
+                        s["user_msgs"] += 1
+                        s["first_prompt"] = s["first_prompt"] or text[:120]
+            elif kind == "response_item":
+                t = p.get("type")
+                if t in ("function_call", "custom_tool_call", "local_shell_call"):
+                    for tool, inp in codex_calls_from(p):
+                        call = make_call(s, ts, tool, inp)
+                        pending.append(call)
+                        by_call_id.setdefault(p.get("call_id") or p.get("id"), []).append(call)
+                elif t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
+                    calls = by_call_id.get(p.get("call_id"), [])
+                    out = p.get("output")
+                    out = result_text(out) if not isinstance(out, str) else out
+                    codes = [int(c) for c in EXIT_RE.findall(out or "")]
+                    for i, call in enumerate(calls):
+                        call["out_tok"] = len(out or "") // 4 // len(calls)
+                        code = codes[i] if i < len(codes) else (codes[-1] if codes else 0)
+                        call["err"] = 1 if code != 0 else 0
+                        if call["err"]:
+                            call["err_text"] = error_line(out)
+                        if ts and call["ts"]:
+                            call["dur"] = int((ts - call["ts"]) * 1000)
+    return [s]
+
+
+def parse_file(job: tuple[str, str, dict]) -> tuple[str, list[dict] | str]:
+    path, source, prices = job
+    try:
+        sessions = (parse_claude if source == "claude" else parse_codex)(path, prices)
+        for s in sessions:
+            s["findings"] = session_findings(s)
+            s["usage"] = dict(s["usage"])
+        return path, sessions
+    except Exception as error:  # one broken file must not stop the rest
+        return path, f"{type(error).__name__}: {error}"
+
+
+# ---------- findings in one session ----------
+
+POLL_MIN = 4      # the same check this many times in a row counts as polling
+REREAD_MIN = 3    # a file read this many times without being changed
+BIG_OUTPUT = 10_000  # tokens in one tool result
+
+
+CHECK_RE = re.compile(r"\b(tail|ps|pgrep|tasklist|get-process|get-job|receive-job|jobs|"
+                      r"nvidia-smi|uptime|docker ps|docker logs|kill -0|test -e|wc -l)\b", re.IGNORECASE)
+
+
+def is_check(c: dict) -> bool:
+    """A look at running work (a log, a process, a background task), as opposed to
+    browsing code; only these make up polling."""
+    if c["kind"] == "poll":
+        return True
+    return c["kind"] == "observe" and bool(LOG_RE.search(c["target"]) or CHECK_RE.search(c["target"]))
+
+
+def session_findings(s: dict) -> list[dict]:
+    calls = s["calls"]
+    found = []
+
+    # Busy polling: the same check repeated while something runs.
+    run = []
+
+    def close(run):
+        if len(run) >= POLL_MIN:
+            wasted = run[2:]  # a check or two is fine
+            found.append({"kind": "polling", "calls": len(wasted),
+                          "cost": sum(c["turn_cost"] for c in wasted),
+                          "tokens": sum(c["turn_tok"] for c in wasted),
+                          "seconds": int(((run[-1]["ts"] or 0) - (run[0]["ts"] or 0))),
+                          "detail": {"example": run[0]["text"] or run[0]["tool"], "repeats": len(run),
+                                     "tool": run[0]["tool"]}})
+
+    for c in calls:
+        if is_check(c):
+            key = c["target"] if c["kind"] == "poll" else re.sub(r"\d+", "N", c["target"])
+            if run and run[-1]["_key"] == key:
+                run.append(c)
+            elif run and c["kind"] == run[-1]["kind"] == "observe":
+                run.append(c)  # checking on the same work in a slightly different way
+            else:
+                close(run)
+                run = [c]
+            c["_key"] = key
+        else:
+            close(run)
+            run = []
+    close(run)
+    for c in calls:
+        c.pop("_key", None)
+
+    # Files read again without having changed.
+    extra = {}
+    seen = defaultdict(int)
+    wasted = []
+    for c in calls:
+        if c["kind"] == "edit" and c["target"]:
+            seen[c["target"]] = 0
+        elif c["kind"] == "read" and c["target"]:
+            seen[c["target"]] += 1
+            if seen[c["target"]] >= 2:
+                wasted.append(c)
+                extra[c["target"]] = extra.get(c["target"], 1) + 1
+    top = sorted(((n, p) for p, n in extra.items() if n >= REREAD_MIN), reverse=True)
+    if top:
+        counted = [c for c in wasted if c["target"] in dict((p, n) for n, p in top)]
+        found.append({"kind": "rereads", "calls": len(counted),
+                      "cost": sum(c["turn_cost"] for c in counted),
+                      "tokens": sum(c["out_tok"] for c in counted),
+                      "seconds": 0, "detail": {"files": [{"path": p, "reads": n} for n, p in top[:5]]}})
+
+    # Very large tool results, which every later turn carries along.
+    big = [c for c in calls if c["out_tok"] >= BIG_OUTPUT]
+    if big:
+        found.append({"kind": "big_outputs", "calls": len(big), "cost": 0.0,
+                      "tokens": sum(c["out_tok"] for c in big), "seconds": 0,
+                      "detail": {"examples": [{"tool": c["tool"], "text": c["text"][:160] or c["target"],
+                                               "tokens": c["out_tok"]}
+                                              for c in sorted(big, key=lambda c: -c["out_tok"])[:5]]}})
+
+    # Commands that failed, and what worked right after.
+    fixes = []
+    for i, c in enumerate(calls):
+        if not c["err"] or c["kind"] not in ("run", "script", "observe", "read") or not c["text"]:
+            continue
+        for d in calls[i + 1:i + 4]:
+            if (d["tool"] == c["tool"] and d["prog"] == c["prog"] and d["text"] and not d["err"]
+                    and d["text"] != c["text"]):
+                a, b = c["text"][:200], d["text"][:200]
+                if difflib.SequenceMatcher(None, a, b).quick_ratio() >= 0.6 and \
+                        difflib.SequenceMatcher(None, a, b).ratio() >= 0.5:
+                    fixes.append({"failed": a, "worked": b})
+                break
+    failures = [c for c in calls if c["err"]]
+    if failures:
+        found.append({"kind": "failures", "calls": len(failures),
+                      "cost": sum(c["turn_cost"] for c in failures),
+                      "tokens": sum(c["turn_tok"] for c in failures), "seconds": 0,
+                      "detail": {"fixes": fixes[:20]}})
+    return found
+
+
+# ---------- the index ----------
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, source TEXT, size INTEGER, mtime REAL, error TEXT);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, file TEXT, source TEXT, parent TEXT,
+  cwd TEXT, project TEXT, title TEXT, client TEXT, first_ts REAL, last_ts REAL, user_msgs INTEGER,
+  compactions INTEGER, calls INTEGER, errors INTEGER, input INTEGER, cache_read INTEGER,
+  cache_write INTEGER, output INTEGER, requests INTEGER, cost REAL, unpriced INTEGER,
+  last_context INTEGER, models TEXT);
+CREATE TABLE IF NOT EXISTS usage (session TEXT, hour TEXT, model TEXT, input INTEGER,
+  cache_read INTEGER, cache_write INTEGER, output INTEGER, requests INTEGER, cost REAL);
+CREATE TABLE IF NOT EXISTS calls (session TEXT, seq INTEGER, ts REAL, tool TEXT, kind TEXT,
+  target TEXT, prog TEXT, text TEXT, dur INTEGER, err INTEGER, out_tok INTEGER, turn_cost REAL,
+  turn_tok INTEGER, script TEXT, err_text TEXT);
+CREATE TABLE IF NOT EXISTS findings (session TEXT, kind TEXT, calls INTEGER, cost REAL,
+  tokens INTEGER, seconds INTEGER, detail TEXT);
+CREATE INDEX IF NOT EXISTS usage_s ON usage(session);
+CREATE INDEX IF NOT EXISTS calls_s ON calls(session);
+CREATE INDEX IF NOT EXISTS calls_script ON calls(script);
+CREATE INDEX IF NOT EXISTS findings_s ON findings(session);
+CREATE INDEX IF NOT EXISTS sessions_file ON sessions(file);
+CREATE INDEX IF NOT EXISTS sessions_last ON sessions(last_ts);
+"""
+
+
+def connect() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(DB_PATH, timeout=120)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    version = None
+    with contextlib.suppress(sqlite3.Error):
+        version = db.execute("SELECT value FROM meta WHERE key='version'").fetchone()
+    if version is None or version[0] != str(INDEX_VERSION):
+        for table in ("meta", "files", "sessions", "usage", "calls", "findings"):
+            db.execute(f"DROP TABLE IF EXISTS {table}")
+        db.executescript(SCHEMA)
+        db.execute("INSERT INTO meta VALUES ('version', ?)", (str(INDEX_VERSION),))
+        db.commit()
+    return db
+
+
+def log_files() -> dict[str, tuple[str, int, float]]:
+    found = {}
+    root = claude_root()
+    if root.is_dir():
+        for p in root.rglob("*.jsonl"):
+            with contextlib.suppress(OSError):
+                st = p.stat()
+                found[str(p)] = ("claude", st.st_size, st.st_mtime)
+    for root in codex_roots():
+        if root.is_dir():
+            for p in root.rglob("rollout-*.jsonl"):
+                with contextlib.suppress(OSError):
+                    st = p.stat()
+                    found[str(p)] = ("codex", st.st_size, st.st_mtime)
+    return found
+
+
+def project_of(cwd: str) -> str:
+    """A short project name from a working directory; worktrees under a
+    `.claude/worktrees` or `-lanes` folder count as their repository."""
+    path = norm_path(cwd)
+    m = re.search(r"/([^/]+)/\.(?:claude|codex)/worktrees/", path)
+    if m:
+        return m.group(1)
+    return path.rsplit("/", 1)[-1] or path or "(unknown)"
+
+
+def store(db: sqlite3.Connection, path: str, source: str, size: int, mtime: float, result) -> None:
+    for (sid,) in db.execute("SELECT id FROM sessions WHERE file=?", (path,)).fetchall():
+        for table, col in (("usage", "session"), ("calls", "session"), ("findings", "session"),
+                           ("sessions", "id")):
+            db.execute(f"DELETE FROM {table} WHERE {col}=?", (sid,))
+    error = result if isinstance(result, str) else None
+    db.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?)", (path, source, size, mtime, error))
+    if error:
+        return
+    for s in result:
+        usage = s["usage"]
+        tot = [sum(v[i] for v in usage.values()) for i in range(6)]
+        models = Counter()
+        for (_, model), v in usage.items():
+            models[model] += v[0] + v[1] + v[2] + v[3]
+        db.execute("DELETE FROM sessions WHERE id=?", (s["id"],))
+        for table in ("usage", "calls", "findings"):
+            db.execute(f"DELETE FROM {table} WHERE session=?", (s["id"],))
+        db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            s["id"], path, s["source"], s["parent"], s["cwd"], project_of(s["cwd"]),
+            s["title"] or s["first_prompt"], s["client"], s["first_ts"], s["last_ts"], s["user_msgs"],
+            s["compactions"], len(s["calls"]), sum(c["err"] for c in s["calls"]), tot[0], tot[1],
+            tot[2], tot[3], tot[4], tot[5], s["unpriced"], s["last_context"],
+            json.dumps(dict(models.most_common()))))
+        db.executemany("INSERT INTO usage VALUES (?,?,?,?,?,?,?,?,?)",
+                       [(s["id"], h, m, *v) for (h, m), v in usage.items()])
+        db.executemany("INSERT INTO calls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+            (s["id"], c["seq"], c["ts"], c["tool"], c["kind"], c["target"], c["prog"], c["text"],
+             c["dur"], c["err"], c["out_tok"], c["turn_cost"], c["turn_tok"], c["script"], c["err_text"])
+            for c in s["calls"]])
+        db.executemany("INSERT INTO findings VALUES (?,?,?,?,?,?,?)", [
+            (s["id"], f["kind"], f["calls"], f["cost"], f["tokens"], f["seconds"], json.dumps(f["detail"]))
+            for f in s["findings"]])
+
+
+def update_index(quiet: bool = False, only: list[str] | None = None) -> dict:
+    """Brings the index up to date with the log files; only new or changed files are read."""
+    db = connect()
+    files = log_files()
+    known = {r["path"]: (r["size"], r["mtime"]) for r in db.execute("SELECT path, size, mtime FROM files")}
+    todo = [(p, src, size, mtime) for p, (src, size, mtime) in files.items()
+            if known.get(p) != (size, mtime) and (only is None or p in only)]
+    gone = [p for p in known if p not in files]
+    for p in gone:
+        store(db, p, "", 0, 0, [])
+        db.execute("DELETE FROM files WHERE path=?", (p,))
+    started = time.time()
+    total_bytes = sum(t[2] for t in todo) or 1
+    done_bytes = 0
+    show = not quiet and total_bytes > 50_000_000
+    prices = load_prices()
+    if show:
+        print(f"Kuakgan: reading {len(todo)} log files ({total_bytes / 1e9:.1f} GB) for the first time "
+              f"or since they changed; later runs only read what is new.", file=sys.stderr, flush=True)
+    jobs = [(p, src, prices) for p, src, _, _ in sorted(todo, key=lambda t: -t[2])]
+    meta = {p: (src, size, mtime) for p, src, size, mtime in todo}
+    workers = min(os.cpu_count() or 2, 8) if total_bytes > 30_000_000 and len(todo) > 1 else 1
+    results = (concurrent.futures.ProcessPoolExecutor(workers).map(parse_file, jobs, chunksize=1)
+               if workers > 1 else map(parse_file, jobs))
+    last_print = time.time()
+    for n, (path, result) in enumerate(results, 1):
+        src, size, mtime = meta[path]
+        store(db, path, src, size, mtime, result)
+        done_bytes += size
+        if n % 50 == 0:
+            db.commit()
+        if show and time.time() - last_print > 5:
+            last_print = time.time()
+            print(f"  {done_bytes / total_bytes:.0%} ({n}/{len(todo)} files)", file=sys.stderr, flush=True)
+    db.commit()
+    if show:
+        print(f"  done in {time.time() - started:.0f} s", file=sys.stderr, flush=True)
+    db.close()
+    return {"read": len(todo), "removed": len(gone), "files": len(files)}
+
+
+# ---------- answers ----------
+
+FIXES = {
+    "polling": {
+        "title": "Busy polling",
+        "what": "The agent checked on running work again and again (tail, cat, ps, wait) "
+                "instead of waiting for it. Every check is a full model turn.",
+        "claude": "Start long commands with run_in_background and wait for the notification, or "
+                  "check with one `sleep 60; tail -n 20 LOG` instead of many quick looks. A line in "
+                  "CLAUDE.md helps: \"While a long command runs, wait for it to finish; do not poll "
+                  "its output more than once a minute.\"",
+        "codex": "Codex returns from a command after 10 seconds by default and the model then "
+                 "starts polling. Let it wait longer: add `background_terminal_max_timeout = 3600000` "
+                 "to ~/.codex/config.toml, and in AGENTS.md: \"While a long command runs, wait on it; "
+                 "do not poll its output more than once a minute.\"",
+    },
+    "rereads": {
+        "title": "Files read again and again",
+        "what": "The same unchanged file was read three or more times in one session. Each read "
+                "puts the whole file into the context again.",
+        "claude": "Read a file once and work from it. If the agent keeps needing the same facts, "
+                  "put the few lines that matter in CLAUDE.md or AGENTS.md instead.",
+    },
+    "big_outputs": {
+        "title": "Very large tool output",
+        "what": "Single tool results of more than 10,000 tokens. They stay in the context, and "
+                "every later turn pays for them again.",
+        "claude": "Ask for less: `| tail -n 50`, `--quiet`, a line range when reading a file, or "
+                  "grep for what you need before reading. Test runners often have a flag that only "
+                  "prints failures.",
+    },
+    "failures": {
+        "title": "Failed commands",
+        "what": "Commands that failed. Many failures repeat across sessions: the same wrong "
+                "command, path or tool, fixed again each time.",
+        "claude": "Run `kuakgan check` at the start of a task: it lists the commands that failed "
+                  "before in this project and what worked instead, so the agent gets it right the "
+                  "first time.",
+    },
+    "scripts": {
+        "title": "The same helper script, rewritten",
+        "what": "Inline scripts (`python - <<PY`, `node -e`) with the same body written in "
+                "several sessions. Each time the model types the whole script again.",
+        "claude": "Save scripts that recur as files in the repository (for example under "
+                  "scripts/) and mention them in CLAUDE.md or AGENTS.md, so agents run them "
+                  "instead of writing them anew.",
+    },
+}
+
+
+def since_ts(days: float | None) -> float:
+    return 0.0 if not days else time.time() - days * 86400
+
+
+def where(days, project, alias="s") -> tuple[str, list]:
+    clauses, params = [f"{alias}.last_ts >= ?"], [since_ts(days)]
+    if project:
+        clauses.append(f"({alias}.project = ? OR {alias}.cwd = ?)")
+        params += [project, project]
+    return " AND ".join(clauses), params
+
+
+def r2(x):
+    return None if x is None else round(x, 2)
+
+
+def summarize_findings(db, days, project) -> list[dict]:
+    w, params = where(days, project)
+    out = []
+    totals = db.execute(f"SELECT COUNT(*) n, COALESCE(SUM(s.cost),0) cost FROM calls c "
+                        f"JOIN sessions s ON s.id = c.session WHERE {w}", params).fetchone()
+    all_calls = totals["n"] or 1
+    rows = db.execute(f"SELECT f.*, s.source, s.project, s.title FROM findings f JOIN sessions s "
+                      f"ON s.id = f.session WHERE {w}", params).fetchall()
+    by_kind = defaultdict(list)
+    for r in rows:
+        by_kind[r["kind"]].append(r)
+    for kind, rs in by_kind.items():
+        fx = FIXES[kind]
+        sources = Counter(r["source"] for r in rs)
+        worst = sorted(rs, key=lambda r: -(r["cost"] or 0) - r["calls"] * 1e-6)[:5]
+        item = {"kind": kind, "title": fx["title"], "what": fx["what"],
+                "sessions": len(rs), "calls": sum(r["calls"] for r in rs),
+                "share_of_calls": round(sum(r["calls"] for r in rs) / all_calls, 3),
+                "cost": r2(sum(r["cost"] or 0 for r in rs)),
+                "tokens": sum(r["tokens"] or 0 for r in rs),
+                "fix": {src: fx.get(src, fx["claude"]) for src in sources},
+                "worst": [{"session": r["session"], "project": r["project"], "title": r["title"],
+                           "calls": r["calls"], "cost": r2(r["cost"]),
+                           "detail": json.loads(r["detail"] or "{}")} for r in worst]}
+        if kind == "failures":
+            item["what"] = fx["what"]
+            item["repeated"] = repeated_failures(db, days, project)[:10]
+        out.append(item)
+    scripts = repeated_scripts(db, days, project)
+    if scripts:
+        n = sum(g["times"] - 1 for g in scripts)
+        out.append({"kind": "scripts", "title": FIXES["scripts"]["title"], "what": FIXES["scripts"]["what"],
+                    "sessions": len({s for g in scripts for s in g["session_ids"]}), "calls": n,
+                    "share_of_calls": round(n / all_calls, 3),
+                    "cost": r2(sum(g["cost"] for g in scripts)), "tokens": sum(g["tokens"] for g in scripts),
+                    "fix": {"claude": FIXES["scripts"]["claude"]},
+                    "worst": [{k: v for k, v in g.items() if k != "session_ids"} for g in scripts[:5]]})
+    order = {"polling": 0, "failures": 1, "scripts": 2, "rereads": 3, "big_outputs": 4}
+    out.sort(key=lambda f: (-(f["cost"] or 0), order.get(f["kind"], 9)))
+    return out
+
+
+def repeated_scripts(db, days, project) -> list[dict]:
+    w, params = where(days, project)
+    rows = db.execute(f"SELECT c.script, c.prog, c.target, c.turn_cost, c.turn_tok, c.session, s.project "
+                      f"FROM calls c JOIN sessions s ON s.id = c.session WHERE c.script IS NOT NULL "
+                      f"AND {w}", params).fetchall()
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r["script"]].append(r)
+    out = []
+    for h, rs in groups.items():
+        if len(rs) >= 3:
+            extra = rs[1:]
+            out.append({"times": len(rs), "language": rs[0]["prog"], "start": rs[0]["target"][:160],
+                        "projects": sorted({r["project"] for r in rs})[:3],
+                        "cost": sum(r["turn_cost"] or 0 for r in extra),
+                        "tokens": sum(r["turn_tok"] or 0 for r in extra),
+                        "session_ids": sorted({r["session"] for r in rs})})
+    return sorted(out, key=lambda g: -g["times"])
+
+
+def failure_key(prog: str, error: str) -> str:
+    """Two failures count as the same mistake when the same program fails with the
+    same error message, apart from paths, numbers and ids in it."""
+    e = re.sub(r"\\u[0-9a-fA-F]{4}|'.'", "C", error or "")
+    e = re.sub(r"(?:[A-Za-z]:)?[\\/][^\s'\"`:,)]+", "P", e)
+    e = re.sub(r"\b[0-9a-f-]{7,}\b|\d+", "N", e)
+    e = re.sub(r"\s+", " ", e).strip()[:120]
+    return f"{prog}|{e}"
+
+
+def repeated_failures(db, days, project) -> list[dict]:
+    """Mistakes made in more than one session: the same program failing with the
+    same error, and the command that worked right after, where one did."""
+    w, params = where(days, project)
+    worked_after = {}
+    for r in db.execute(f"SELECT f.session, f.detail FROM findings f JOIN sessions s ON s.id = f.session "
+                        f"WHERE f.kind = 'failures' AND {w}", params):
+        for fx in json.loads(r["detail"] or "{}").get("fixes", []):
+            worked_after[(r["session"], fx["failed"])] = fx["worked"]
+    groups = defaultdict(list)
+    for r in db.execute(f"SELECT c.prog, c.tool, c.text, c.err_text, c.session, c.turn_cost FROM calls c "
+                        f"JOIN sessions s ON s.id = c.session WHERE c.err = 1 AND c.text != '' "
+                        f"AND c.err_text != '' AND {w}", params):
+        groups[failure_key(r["prog"] or r["tool"], r["err_text"])].append(r)
+    out = []
+    for key, rs in groups.items():
+        sessions = {r["session"] for r in rs}
+        if len(sessions) < 2:
+            continue
+        worked = Counter(worked_after[(r["session"], r["text"][:200])] for r in rs
+                         if (r["session"], r["text"][:200]) in worked_after)
+        example = next((r for r in rs if (r["session"], r["text"][:200]) in worked_after), rs[0])
+        out.append({"program": rs[0]["prog"] or rs[0]["tool"], "error": rs[0]["err_text"][:200],
+                    "failed": example["text"][:200], "times": len(rs), "sessions": len(sessions),
+                    "worked_instead": worked_after.get((example["session"], example["text"][:200])),
+                    "cost": r2(sum(r["turn_cost"] or 0 for r in rs[1:]))})
+    out.sort(key=lambda g: (-g["sessions"], -g["times"]))
+    return out
+
+
+def model_family(model: str) -> str:
+    return re.sub(r"-\d{8}$", "", model or "unknown")
+
+
+def summary(days=30, project=None, sessions_limit=10) -> dict:
+    db = connect()
+    w, params = where(days, project)
+    t = db.execute(f"SELECT COUNT(*) sessions, SUM(input) input, SUM(cache_read) cache_read, "
+                   f"SUM(cache_write) cache_write, SUM(output) output, SUM(cost) cost, SUM(calls) calls, "
+                   f"SUM(errors) errors, SUM(unpriced) unpriced, SUM(requests) requests, "
+                   f"SUM(user_msgs) user_msgs, MIN(first_ts) first_ts FROM sessions s WHERE {w}",
+                   params).fetchone()
+    hour_from = hour_of(since_ts(days)) if days else ""
+    uw = f"u.hour >= ? AND s.id = u.session" + (" AND (s.project = ? OR s.cwd = ?)" if project else "")
+    up = [hour_from] + ([project, project] if project else [])
+    models = [dict(r) for r in db.execute(
+        f"SELECT u.model, s.source, SUM(u.input) input, SUM(u.cache_read) cache_read, "
+        f"SUM(u.cache_write) cache_write, SUM(u.output) output, SUM(u.requests) requests, SUM(u.cost) cost "
+        f"FROM usage u, sessions s WHERE {uw} GROUP BY u.model, s.source ORDER BY cost DESC, output DESC", up)]
+    for m in models:
+        m["tokens"] = m["input"] + m["cache_read"] + m["cache_write"] + m["output"]
+        m["priced"] = price_for(m["model"], load_prices()) is not None
+        m["cost"] = r2(m["cost"]) if m["priced"] else None
+    days_rows = db.execute(
+        f"SELECT substr(u.hour, 1, 10) day, u.model, SUM(u.input + u.cache_read + u.cache_write + u.output) "
+        f"tokens, SUM(u.output) output, SUM(u.cost) cost FROM usage u, sessions s WHERE {uw} "
+        f"GROUP BY day, u.model ORDER BY day", up).fetchall()
+    projects = [dict(r) for r in db.execute(
+        f"SELECT project, COUNT(*) sessions, SUM(input + cache_read + cache_write + output) tokens, "
+        f"SUM(cost) cost, SUM(calls) calls, MAX(last_ts) last_ts, "
+        f"GROUP_CONCAT(DISTINCT source) sources FROM sessions s WHERE {w} "
+        f"GROUP BY project ORDER BY cost DESC, tokens DESC LIMIT 25", params)]
+    for p in projects:
+        p["cost"] = r2(p["cost"])
+    top = [session_row(r) for r in db.execute(
+        f"SELECT * FROM sessions s WHERE {w} ORDER BY cost DESC, (input + cache_read + output) DESC "
+        f"LIMIT ?", params + [sessions_limit])]
+    findings = summarize_findings(db, days, project)
+    db.close()
+    tokens = sum((t[k] or 0) for k in ("input", "cache_read", "cache_write", "output"))
+    wasted_calls = sum(f["calls"] for f in findings if f["kind"] != "big_outputs")
+    return {
+        "period_days": days, "project": project,
+        "totals": {"sessions": t["sessions"], "tokens": tokens, "input": t["input"] or 0,
+                   "cache_read": t["cache_read"] or 0, "cache_write": t["cache_write"] or 0,
+                   "output": t["output"] or 0, "model_calls": t["requests"] or 0,
+                   "tool_calls": t["calls"] or 0, "failed_tool_calls": t["errors"] or 0,
+                   "prompts": t["user_msgs"] or 0, "cost": r2(t["cost"] or 0),
+                   "tokens_without_price": t["unpriced"] or 0,
+                   "wasted_tool_calls": wasted_calls,
+                   "waste_share": round(wasted_calls / (t["calls"] or 1), 3),
+                   "waste_cost": r2(sum(f["cost"] or 0 for f in findings if f["kind"] != "big_outputs"))},
+        "cost_note": "Estimated at API list prices; on a subscription you pay a flat fee instead.",
+        "models": models,
+        "days": [dict(r) for r in days_rows],
+        "projects": projects,
+        "top_sessions": top,
+        "findings": findings,
+    }
+
+
+def session_row(r) -> dict:
+    d = dict(r)
+    d["tokens"] = d["input"] + d["cache_read"] + d["cache_write"] + d["output"]
+    d["models"] = json.loads(d["models"] or "{}")
+    d["cost"] = r2(d["cost"])
+    for k in ("first_ts", "last_ts"):
+        d[k] = datetime.fromtimestamp(d[k], timezone.utc).isoformat(timespec="seconds") if d[k] else None
+    for k in ("file", "input", "cache_read", "cache_write", "output", "unpriced"):
+        d.pop(k, None)
+    return d
+
+
+def find_project_sessions(db, directory: str) -> tuple[str, list]:
+    cwd = norm_path(os.path.abspath(directory))
+    rows = db.execute("SELECT id, cwd, project FROM sessions").fetchall()
+    exact = [r for r in rows if norm_path(r["cwd"]).lower() == cwd.lower()]
+    if not exact:
+        exact = [r for r in rows if cwd.lower().startswith(norm_path(r["cwd"]).lower() + "/")
+                 or norm_path(r["cwd"]).lower().startswith(cwd.lower() + "/")]
+    project = exact[0]["project"] if exact else project_of(cwd)
+    return project, [r["id"] for r in rows if r["project"] == project]
+
+
+def check(directory: str = ".") -> dict:
+    """What an agent working in `directory` should know: earlier mistakes in this
+    project and how the current session is doing. Kept short; it goes into context."""
+    started = time.time()
+    db = connect()
+    # Index only this project's newest files on the hot path, so the answer is quick.
+    db.close()
+    update_index(quiet=True)
+    db = connect()
+    project, ids = find_project_sessions(db, directory)
+    tips = []
+    w = f"s.project = ?"
+    rf = repeated_failures(db, 90, project)
+    pitfalls = [{"program": f["program"], "error": f["error"][:160], "failed": f["failed"][:160],
+                 "worked": f["worked_instead"][:160] if f["worked_instead"] else None,
+                 "times": f["times"], "sessions": f["sessions"]} for f in rf[:8]]
+    rereads = Counter()
+    for r in db.execute(f"SELECT f.detail FROM findings f JOIN sessions s ON s.id = f.session "
+                        f"WHERE f.kind = 'rereads' AND {w} AND s.last_ts >= ?", (project, since_ts(30))):
+        for f in json.loads(r["detail"]).get("files", []):
+            rereads[f["path"]] += f["reads"]
+    big = Counter()
+    for r in db.execute(f"SELECT c.prog, c.text, c.out_tok FROM calls c JOIN sessions s ON s.id = c.session "
+                        f"WHERE {w} AND c.out_tok >= ? AND c.text != '' AND s.last_ts >= ?",
+                        (project, BIG_OUTPUT, since_ts(30))):
+        big[re.sub(r"\s+", " ", r["text"])[:80]] += 1
+    scripts = [g for g in repeated_scripts(db, 60, project)][:3]
+    # The session in this project written to most recently is taken to be the caller's.
+    current = db.execute("SELECT * FROM sessions WHERE project = ? AND parent IS NULL "
+                         "ORDER BY last_ts DESC LIMIT 1", (project,)).fetchone()
+    now = None
+    if current and current["last_ts"] and time.time() - current["last_ts"] < 1800:
+        f = {r["kind"]: dict(r) for r in db.execute("SELECT * FROM findings WHERE session = ?", (current["id"],))}
+        tail = db.execute("SELECT kind, target, tool FROM calls WHERE session = ? ORDER BY seq DESC LIMIT 6",
+                          (current["id"],)).fetchall()
+        polling_now = len(tail) >= 4 and all(r["kind"] in ("observe", "poll") for r in tail[:4])
+        now = {"session": current["id"], "title": current["title"], "model_calls": current["requests"],
+               "tool_calls": current["calls"], "cost": r2(current["cost"]),
+               "context_tokens": current["last_context"], "compactions": current["compactions"],
+               "polling_calls": (f.get("polling") or {}).get("calls", 0),
+               "reread_calls": (f.get("rereads") or {}).get("calls", 0),
+               "polling_now": polling_now}
+        if polling_now:
+            tips.append("Your last few steps only checked on running work. Wait for it instead: one "
+                        "`sleep 60` then a single check, or a background run with a notification.")
+        if now["reread_calls"] >= 3:
+            tips.append("You have read the same unchanged files several times this session; work from "
+                        "what you already read.")
+        if (current["last_context"] or 0) > 400_000:
+            tips.append("This session's context is very large; consider finishing the current step and "
+                        "handing over to a fresh session with a short summary.")
+    for p in pitfalls[:4]:
+        tips.append(pitfall_tip(p))
+    if scripts:
+        tips.append(f"An inline {scripts[0]['language']} script starting `{scripts[0]['start'][:60]}` "
+                    f"has been written {scripts[0]['times']} times here; save it as a file and reuse it.")
+    db.close()
+    return {"project": project, "sessions_seen": len(ids), "tips": tips,
+            "pitfalls": pitfalls,
+            "often_reread": [{"path": p, "reads": n} for p, n in rereads.most_common(5)],
+            "big_outputs": [{"command": c, "times": n} for c, n in big.most_common(3)],
+            "repeated_scripts": [{"language": g["language"], "times": g["times"], "start": g["start"][:100]}
+                                 for g in scripts],
+            "this_session": now, "took_seconds": round(time.time() - started, 1)}
+
+
+def pitfall_tip(p: dict) -> str:
+    one_line = lambda t, n: re.sub(r"\s+", " ", t)[:n]
+    tip = (f"`{p['program']}` failed {p['times']} times in {p['sessions']} earlier sessions here with "
+           f"\"{one_line(p['error'], 120)}\" (for example `{one_line(p['failed'], 90)}`)")
+    return tip + (f"; this worked: `{one_line(p['worked'], 90)}`." if p["worked"] else ".")
+
+
+def check_text(answer: dict) -> str:
+    """The short plain-text form, for a SessionStart hook."""
+    lines = [f"Kuakgan, project {answer['project']}:"]
+    lines += [f"- {t}" for t in answer["tips"]] or ["- No earlier mistakes recorded here."]
+    for p in answer["pitfalls"][4:6]:
+        lines.append("- " + pitfall_tip(p))
+    if answer["often_reread"]:
+        lines.append("- Files earlier sessions re-read often: " +
+                     ", ".join(Path(f["path"]).name for f in answer["often_reread"][:3]))
+    return "\n".join(lines)
+
+
+def list_sessions(days=7, project=None, limit=30) -> list[dict]:
+    db = connect()
+    w, params = where(days, project)
+    rows = [session_row(r) for r in db.execute(
+        f"SELECT * FROM sessions s WHERE {w} ORDER BY last_ts DESC LIMIT ?", params + [limit])]
+    db.close()
+    return rows
+
+
+INSTRUCTIONS = """## Kuakgan
+
+Kuakgan reads this computer's Claude Code and Codex logs. At the start of each
+task, and before waiting on a long-running command, run:
+
+    {cmd} check
+
+It lists commands that failed before in this project and what worked instead,
+files earlier sessions kept re-reading, and how this session is doing. Follow
+its tips; mention one to the user only if it changes what you do."""
+
+
+# ---------- dashboard ----------
+
+def app_browser() -> str | None:
+    candidates = {
+        "win32": [os.path.expandvars(p) for p in (
+            r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+            r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+            r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+            r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+            r"%LocalAppData%\Google\Chrome\Application\chrome.exe")],
+        "darwin": ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                   "/Applications/Chromium.app/Contents/MacOS/Chromium"],
+    }.get(sys.platform)
+    if candidates is None:
+        candidates = [shutil.which(n) for n in ("google-chrome", "chromium", "chromium-browser",
+                                                "microsoft-edge")]
+    return next((p for p in candidates if p and os.path.exists(p)), None)
+
+
+def open_window(url: str) -> None:
+    browser = app_browser()
+    if browser:
+        with contextlib.suppress(OSError):
+            subprocess.Popen([browser, f"--app={url}", "--window-size=1500,1000"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+    webbrowser.open(url)
+
+
+def dashboard_answers(url: str) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            return b"<title>Kuakgan</title>" in response.read(3000)
+    except OSError:
+        return False
+
+
+def serve_dashboard(port: int, open_browser: bool) -> None:
+    url = f"http://127.0.0.1:{port}/"
+    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.headers.get("Host") not in allowed_hosts:  # stops DNS rebinding
+                self.send_error(403)
+                return
+            parsed = urlparse(self.path)
+            q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            if parsed.path == "/data.json":
+                update_index(quiet=True)
+                days = float(q.get("days") or 30) or None
+                body = json.dumps(summary(days, q.get("project") or None, 25)).encode()
+                kind = "application/json"
+            elif parsed.path == "/logo.svg":
+                body, kind = (HERE / "logo.svg").read_bytes(), "image/svg+xml"
+                if parsed.query == "dark":  # the bright variant, for the dark share card
+                    body = body.replace(b"#0f9d6b", b"#2fd08b")
+            elif parsed.path in ("/", "/index.html"):
+                body, kind = (HERE / "dashboard.html").read_bytes(), "text/html; charset=utf-8"
+            else:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    class Server(ThreadingHTTPServer):
+        allow_reuse_address = sys.platform != "win32"
+
+    try:
+        server = Server(("127.0.0.1", port), Handler)
+    except OSError as error:
+        if dashboard_answers(url):
+            print(f"Kuakgan dashboard is already running on {url}")
+            if open_browser:
+                open_window(url)
+            return
+        sys.exit(f"Cannot start the dashboard on port {port}: {error}. Try another port with --port.")
+    update_index()
+    print(f"Kuakgan dashboard on {url} (Ctrl+C to stop)", flush=True)
+    if open_browser:
+        open_window(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+# ---------- command line ----------
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="kuakgan", description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def scope(p, days):
+        p.add_argument("--days", type=float, default=days, help=f"look back this many days (default {days}; 0 = all)")
+        p.add_argument("--project", help="only this project (its folder name or full path)")
+
+    scope(sub.add_parser("summary", help="tokens, cost, models, projects and waste, as JSON"), 30)
+    scope(sub.add_parser("findings", help="waste patterns with fixes, as JSON"), 30)
+    p = sub.add_parser("sessions", help="recent sessions, as JSON")
+    scope(p, 7)
+    p.add_argument("--limit", type=int, default=30)
+    p = sub.add_parser("check", help="for agents: earlier mistakes here and how this session is doing")
+    p.add_argument("--dir", default=".", help="the project folder (default: the current folder)")
+    p.add_argument("--hook", action="store_true", help="short plain text, for a SessionStart hook")
+    sub.add_parser("instructions", help="the block to add to CLAUDE.md or AGENTS.md")
+    p = sub.add_parser("index", help="read new and changed logs now")
+    p.add_argument("--rebuild", action="store_true", help="forget the index and read everything again")
+    p = sub.add_parser("dashboard", help="open the dashboard in the browser")
+    p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--no-browser", action="store_true")
+
+    args = parser.parse_args(argv)
+    with contextlib.suppress(AttributeError, ValueError):  # consoles that cannot show every character
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    out = lambda obj: print(json.dumps(obj, indent=2))
+
+    if args.command in ("summary", "findings", "sessions"):
+        update_index()
+        days = args.days or None
+        if args.command == "summary":
+            out({**summary(days, args.project), "about": ABOUT})
+        elif args.command == "findings":
+            db = connect()
+            out({"findings": summarize_findings(db, days, args.project), "about": ABOUT})
+            db.close()
+        else:
+            out(list_sessions(days, args.project, args.limit))
+    elif args.command == "check":
+        answer = check(args.dir)
+        if args.hook:
+            print(check_text(answer))
+        else:
+            out(answer)
+    elif args.command == "instructions":
+        quote = lambda p: f'"{p}"' if " " in p else p
+        cmd = f"{quote(Path(sys.executable).as_posix())} {quote((HERE / 'kuakgan.py').as_posix())}"
+        print(INSTRUCTIONS.format(cmd=cmd))
+    elif args.command == "index":
+        if args.rebuild and DB_PATH.exists():
+            for suffix in ("", "-wal", "-shm"):
+                with contextlib.suppress(OSError):
+                    Path(str(DB_PATH) + suffix).unlink()
+        out(update_index())
+    elif args.command == "dashboard":
+        serve_dashboard(args.port, not args.no_browser)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
