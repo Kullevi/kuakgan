@@ -32,8 +32,8 @@ create accounts.
    SessionStart hook). From then on agents run `kuakgan check` at the start of
    a task and get the earlier mistakes in that project with what worked
    instead.
-4. **Something to share.** A card with the user's totals, without project or
-   session names.
+4. **Something to share.** The dashboard fits in one window, so a screenshot
+   shows all of it; a private mode hides project, session and machine names.
 
 ## What Kuakgan does
 
@@ -48,7 +48,7 @@ create accounts.
   fix that worked), very large tool outputs. Each with its cost and a fix.
 - **Answer agents.** `kuakgan check` for the current project and session;
   `summary`, `findings` and `sessions` as JSON.
-- **Show a dashboard** on localhost, with a share card.
+- **Show a dashboard** on localhost, in one window, with a screenshot button.
 
 ## Left out
 

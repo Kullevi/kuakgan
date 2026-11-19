@@ -48,7 +48,7 @@ taken out of our own setup and made general.
 | **Usage** | Tokens per day by model, cost at API list prices, cache use, and which projects and sessions used the most. |
 | **Waste** | Busy polling, files read again without having changed, the same inline script written in several sessions, commands that failed (and those that failed in several sessions), and very large tool outputs. Each with how much it cost and how to fix it. |
 | **For agents** | `kuakgan check`: earlier mistakes in this project and what worked instead, files earlier sessions kept re-reading, and how the current session is doing. |
-| **To share** | A card with your numbers, without project or session names, to download or copy. |
+| **To share** | The whole dashboard fits in one window. The Screenshot button copies a picture of it; Private hides project, session and machine names first. |
 
 Costs are estimates at API list prices. If you use a subscription you pay a flat
 fee instead; the estimate shows what the same work would cost through the API.
@@ -111,12 +111,8 @@ Kuakgan finds the logs in `~/.claude/projects`, `~/.codex/sessions` and
 when those are set). If a folder is missing, that tool has simply not been
 used on this computer.
 
-**Keep the history (after asking the user).** Claude Code deletes conversations
-older than 30 days by default. Kuakgan keeps every session it has read, even
-after its log is gone, but anything deleted before Kuakgan saw it is lost; this
-is why older months often look empty at first. Suggest keeping them: with the
-user's OK, set `"cleanupPeriodDays": 3650` in `~/.claude/settings.json` (merge
-it with what is there). Codex keeps its sessions until they are deleted by hand.
+Kuakgan looks back at most 30 days: Claude Code deletes conversations older
+than that by default, so a longer period would only look empty.
 
 ### 3. Other computers (Agent, after asking the user)
 
@@ -169,9 +165,9 @@ tab). On a computer without a screen, such as one you reach over SSH, it
 prints the address instead: give it to the user. Tell the user that:
 
 - the period buttons and the project menu change what is shown;
-- "Hide names" blurs project, session and machine names, for screenshots;
-- the card at the bottom shows only totals, and can be downloaded or copied to
-  post;
+- "Private" replaces project, session and machine names with numbers, so
+  the window can be shown or shared;
+- "Screenshot" copies a picture of the window, ready to paste into a post;
 - they can ask you to "open the Kuakgan dashboard" again later.
 
 To stop it: `kuakgan dashboard --stop`.
@@ -224,7 +220,7 @@ Every command answers in JSON, except `check --hook` and `instructions`.
 
 | Command | What it does |
 |---|---|
-| `summary [--days N] [--project P] [--full]` | The main points: tokens, cost, models, machines, projects, top sessions and waste. Default: the last 30 days; `--days 0` means all. `--full` adds every day and where each finding happened. |
+| `summary [--days N] [--project P] [--full]` | The main points: tokens, cost, models, machines, projects, top sessions and waste. Default and longest: the last 30 days. `--full` adds every day and where each finding happened. |
 | `findings [--days N] [--project P]` | The waste patterns, each with what it is, what it cost, a fix, and where it happened most. |
 | `sessions [--days N] [--project P] [--limit N]` | Recent sessions with their tokens, cost and tool calls. |
 | `check [--dir DIR] [--hook]` | For agents: earlier mistakes in this project and what worked instead, files often re-read, repeated scripts, and the current session. `--hook` gives short plain text. |
@@ -288,9 +284,9 @@ over SSH, and writes its index (`.kuakgan.db`) next to `kuakgan.py`. The list
 of other computers is in `kuakgan.json` next to it. The dashboard listens on `127.0.0.1` only. The index
 keeps the first 400 characters of each command and the line of an error, so
 that it can show you what failed; it keeps no file contents, and of the
-conversation only each session's title or the start of its first prompt. Sessions stay in the index after their logs are deleted. Delete `.kuakgan.db`
-to remove them; it is rebuilt from the logs that are still there. The share card shows totals and
-model names only.
+conversation only each session's title or the start of its first prompt. Delete `.kuakgan.db`
+to forget it all; it is rebuilt from the logs. In Private mode the dashboard and its
+screenshots show no project, session or machine names, commands or file names.
 
 ## Troubleshooting
 

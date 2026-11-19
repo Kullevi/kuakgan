@@ -12,9 +12,8 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    calls and per-session findings. Each command first re-reads only the log
    files whose size or modification time changed. A file is always re-read
    whole, so a session's numbers never drift; the first run uses several
-   processes. A session stays in the index after its log is deleted (Claude
-   Code deletes conversations after 30 days by default), so the index becomes the
-   history. Changing how logs are read bumps an index version, and the index is
+   processes. Periods are at most 30 days, since Claude Code deletes
+   conversations after that by default. Changing how logs are read bumps an index version, and the index is
    then rebuilt from the logs that are left.
 3. **One model call, one cost.** Claude Code writes an assistant message as
    several lines with the same message id; usage is counted once per id.
@@ -52,8 +51,11 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    ten minutes, except by `index`.
 9. **The dashboard is one page.** `kuakgan.py dashboard` serves
    `dashboard.html` and `/data.json` on 127.0.0.1, refusing requests for any
-   other host name (DNS rebinding). Charts are inline SVG and the share card a
-   canvas; no outside scripts or fonts, so it works offline. A background
+   other host name (DNS rebinding). Its cards fill one window, with text that
+   grows with it, so a screenshot shows everything; the Screenshot button has
+   Edge or Chrome draw the same page without a window. Private mode numbers
+   projects, sessions and machines instead of naming them. Charts are inline SVG;
+   no outside scripts or fonts, so it works offline. A background
    thread reads new logs every minute and prepares the usual periods, so that
    switching between them answers at once.
 10. **Installation is a clone.** One Python file using only the standard

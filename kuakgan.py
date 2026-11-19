@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 # On another machine the source runs without a file of its own (see REMOTE_BOOT).
 HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
@@ -1056,8 +1056,16 @@ FIXES = {
 }
 
 
+# Claude Code deletes conversations older than 30 days by default, so no period is longer.
+MAX_DAYS = 30
+
+
+def period(days: float | None) -> float:
+    return min(days or MAX_DAYS, MAX_DAYS)
+
+
 def since_ts(days: float | None) -> float:
-    return 0.0 if not days else time.time() - days * 86400
+    return time.time() - period(days) * 86400
 
 
 def where(days, project, alias="s") -> tuple[str, list]:
@@ -1179,6 +1187,7 @@ def model_family(model: str) -> str:
 
 
 def summary(days=30, project=None, sessions_limit=10) -> dict:
+    days = period(days)
     db = connect()
     w, params = where(days, project)
     t = db.execute(f"SELECT COUNT(*) sessions, SUM(input) input, SUM(cache_read) cache_read, "
@@ -1186,7 +1195,7 @@ def summary(days=30, project=None, sessions_limit=10) -> dict:
                    f"SUM(errors) errors, SUM(unpriced) unpriced, SUM(requests) requests, "
                    f"SUM(user_msgs) user_msgs, MIN(first_ts) first_ts FROM sessions s WHERE {w}",
                    params).fetchone()
-    hour_from = hour_of(since_ts(days)) if days else ""
+    hour_from = hour_of(since_ts(days))
     uw = f"u.hour >= ? AND s.id = u.session" + (" AND (s.project = ? OR s.cwd = ?)" if project else "")
     up = [hour_from] + ([project, project] if project else [])
     models = [dict(r) for r in db.execute(
@@ -1435,6 +1444,28 @@ def open_window(url: str) -> None:
     webbrowser.open(url)
 
 
+def screenshot(url: str, width: int, height: int) -> bytes | None:
+    """A sharp PNG of the dashboard at the window's size, drawn by Edge or Chrome
+    without a window. A throwaway profile keeps it apart from the open window."""
+    import tempfile
+    browser = app_browser()
+    if not browser:
+        return None
+    folder = tempfile.mkdtemp(prefix="kuakgan-shot-")
+    out = os.path.join(folder, "shot.png")
+    try:
+        subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+                        f"--user-data-dir={os.path.join(folder, 'profile')}",
+                        f"--window-size={width},{height}", "--force-device-scale-factor=2",
+                        "--virtual-time-budget=8000", f"--screenshot={out}", url],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
+        return Path(out).read_bytes() if os.path.exists(out) else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def dashboard_answers(url: str) -> bool:
     import urllib.request
     try:
@@ -1447,7 +1478,7 @@ def dashboard_answers(url: str) -> bool:
 def serve_dashboard(port: int, open_browser: bool) -> None:
     url = f"http://127.0.0.1:{port}/"
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    cache, lock = {}, threading.Lock()
+    cache, lock, one_shot = {}, threading.Lock(), threading.Lock()
 
     def data(days, project) -> bytes:
         with lock:
@@ -1467,7 +1498,7 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
                 if done["read"] or done["removed"] or any(m.get("read") for m in done.get("machines", {}).values()):
                     with lock:
                         cache.clear()
-                for days in (30, 7, 90, None):
+                for days in (30, 7, 1):
                     data(days, None)
             time.sleep(60)
 
@@ -1479,12 +1510,32 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
             parsed = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             if parsed.path == "/data.json":
-                days = float(q.get("days") or 0) or None
+                try:
+                    days = period(float(q.get("days") or 0))
+                except ValueError:
+                    self.send_error(400)
+                    return
                 body, kind = data(days, q.get("project") or None), "application/json"
+            elif parsed.path == "/screenshot.png":
+                # The custom header makes a browser refuse the request from any other
+                # site, so only the dashboard itself can start a screenshot.
+                if self.headers.get("X-Kuakgan") != "shot":
+                    self.send_error(403)
+                    return
+                try:
+                    width, height = (min(4000, max(300, int(q.get(k) or d))) for k, d in (("w", 1500), ("h", 950)))
+                except ValueError:
+                    self.send_error(400)
+                    return
+                view = {k: q[k] for k in ("days", "project", "private", "metric") if q.get(k)}
+                with one_shot:
+                    body = screenshot(url + "?" + urlencode({**view, "shot": "1"}), width, height)
+                if body is None:
+                    self.send_error(501, "Screenshots need Edge or Chrome")
+                    return
+                kind = "image/png"
             elif parsed.path == "/logo.svg":
                 body, kind = (HERE / "logo.svg").read_bytes(), "image/svg+xml"
-                if parsed.query == "dark":  # the bright variant, for the dark share card
-                    body = body.replace(b"#0f9d6b", b"#2fd08b")
             elif parsed.path in ("/", "/index.html"):
                 body, kind = (HERE / "dashboard.html").read_bytes(), "text/html; charset=utf-8"
             else:
@@ -1567,7 +1618,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def scope(p, days):
-        p.add_argument("--days", type=float, default=days, help=f"look back this many days (default {days}; 0 = all)")
+        p.add_argument("--days", type=float, default=days, help=f"look back this many days (default {days}, at most {MAX_DAYS})")
         p.add_argument("--project", help="only this project (its folder name or full path)")
 
     p = sub.add_parser("summary", help="tokens, cost, models, projects and waste, as JSON")
@@ -1607,7 +1658,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in ("summary", "findings", "sessions"):
         update_index(pull=None)
-        days = args.days or None
+        days = period(args.days)
         if args.command == "summary":
             answer = summary(days, args.project)
             out({**(answer if args.full else brief(answer)), "about": ABOUT})
