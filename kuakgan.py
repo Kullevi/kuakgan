@@ -37,7 +37,7 @@ HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd(
 DB_PATH = Path(os.environ.get("KUAKGAN_DB", HERE / ".kuakgan.db"))
 MACHINES_PATH = Path(os.environ.get("KUAKGAN_MACHINES", HERE / "kuakgan.json"))
 PULL_EVERY = 600  # seconds between fetching from other machines, except for `index`
-INDEX_VERSION = 8  # bump when parsing changes; the index is then rebuilt
+INDEX_VERSION = 9  # bump when parsing changes; the index is then rebuilt
 
 
 def claude_root() -> Path:
@@ -113,8 +113,7 @@ NEUTRAL_PROGS = {"cd", "set-location", "sl", "pushd", "popd", "export", "set", "
                  "chcp", "$erroractionpreference", "setlocal", ""}
 READ_PROGS = {"cat", "get-content", "gc", "type", "head", "less", "sed", "bat"}
 SCRIPT_RE = re.compile(r"(?:^|[;&|(]\s*|\n\s*)(?:\S*[/\\])?(python3?|py|node|deno|bun|ruby|perl|php|pwsh|powershell)(\.exe)?\s+"
-                       r"(?:-\w+\s+)*(-c|-e|--eval|-Command|-)?\s*(?:<<-?\s*['\"]?(\w+)['\"]?)?",
-                       re.IGNORECASE)
+                       r"(?:-(?![ce]\s)\w+\s+)*(-c|-e|--eval|(?i:-command)|-)?\s*(?:<<-?\s*['\"]?(\w+)['\"]?)?")
 HEREDOC_RE = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?\s*\n(.*?)\n\s*\1\s*$", re.DOTALL | re.MULTILINE)
 SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 LOG_RE = re.compile(r"\.(log|out|err|jsonl|output)\b|/tasks/|\\tasks\\|inbox|last\.md|progress",
@@ -181,11 +180,12 @@ def classify_command(cmd: str) -> tuple[str, str, str, str | None]:
     m = SCRIPT_RE.search(text)
     if m and (m.group(3) or m.group(4)):
         body = ""
-        doc = HEREDOC_RE.search(text)
+        rest = text[m.start():]
+        doc = HEREDOC_RE.search(rest)
         if doc:
             body = doc.group(2)
         else:
-            q = re.search(r"""(?:-c|-e|--eval|-Command)\s+(['"])(.*)\1""", text, re.DOTALL | re.IGNORECASE)
+            q = re.search(r"""(?:-c|-e|--eval|(?i:-command))\s+(['"])(.*)\1""", rest, re.DOTALL)
             body = q.group(2) if q else ""
         if len(body) > 120:
             norm = re.sub(r"\s+", " ", re.sub(r"(?m)#.*$", "", body)).strip()
@@ -207,7 +207,7 @@ def classify_command(cmd: str) -> tuple[str, str, str, str | None]:
             p in ("sleep", "start-sleep") and int((re.findall(r"\d+", s) or ["0"])[0]) >= 30
             for s, p in zip(segments, progs)):
         return "wait", "", prog, None  # waits by itself: not polling
-    if all(p in OBSERVE_PROGS for p in progs):
+    if all(p in OBSERVE_PROGS for p in progs) and not re.search(r"(?<![\d&>])>>?\s*(?!&)[^\s|]", text):
         files = [f for s in segments for f in file_args(s)]
         if (len(segments) <= 2 and progs[0] in READ_PROGS and len(files) == 1
                 and not FLAG_TAIL_RE.search(text) and not LOG_RE.search(files[0])
@@ -592,7 +592,7 @@ def session_findings(s: dict) -> list[dict]:
     # Very large tool results, which every later turn carries along.
     big = [c for c in calls if c["out_tok"] >= BIG_OUTPUT]
     if big:
-        found.append({"kind": "big_outputs", "calls": len(big), "cost": 0.0,
+        found.append({"kind": "big_outputs", "calls": len(big), "cost": None,
                       "tokens": sum(c["out_tok"] for c in big), "seconds": 0,
                       "detail": {"examples": [{"tool": c["tool"], "text": c["text"][:160] or c["target"],
                                                "tokens": c["out_tok"]}
@@ -945,10 +945,10 @@ FIXES = {
         "title": "Busy polling",
         "what": "The agent checked on running work again and again (tail, cat, ps, wait) "
                 "instead of waiting for it. Every check is a full model turn.",
-        "claude": "Start long commands with run_in_background and wait for the notification, or "
-                  "check with one `sleep 60; tail -n 20 LOG` instead of many quick looks. A line in "
-                  "CLAUDE.md helps: \"While a long command runs, wait for it to finish; do not poll "
-                  "its output more than once a minute.\"",
+        "claude": "Start long commands with run_in_background and wait for the notification that "
+                  "they finished, instead of looking at their output. A line in CLAUDE.md helps: "
+                  "\"While a long command runs in the background, wait for its notification; do not "
+                  "check its output in between.\"",
         "codex": "Codex returns from a command after 10 seconds by default and the model then "
                  "starts polling. Let it wait longer: add `background_terminal_max_timeout = 3600000` "
                  "to ~/.codex/config.toml, and in AGENTS.md: \"While a long command runs, wait on it; "
@@ -1022,7 +1022,7 @@ def summarize_findings(db, days, project) -> list[dict]:
         item = {"kind": kind, "title": fx["title"], "what": fx["what"],
                 "sessions": len(rs), "calls": sum(r["calls"] for r in rs),
                 "share_of_calls": round(sum(r["calls"] for r in rs) / all_calls, 3),
-                "cost": r2(sum(r["cost"] or 0 for r in rs)),
+                "cost": None if kind == "big_outputs" else r2(sum(r["cost"] or 0 for r in rs)),
                 "tokens": sum(r["tokens"] or 0 for r in rs),
                 "fix": {src: fx.get(src, fx["claude"]) for src in sources},
                 "worst": [{"session": r["session"], "project": r["project"], "title": r["title"],

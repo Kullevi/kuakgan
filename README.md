@@ -98,7 +98,7 @@ git clone https://github.com/Kullevi/kuakgan.git ~/kuakgan
 ### 2. Read the logs once
 
 Run `kuakgan index`. The first run reads all of the user's Claude Code and
-Codex logs; with several gigabytes of logs it takes a minute or two and prints
+Codex logs; 10 to 20 GB of logs take between half a minute and a few minutes, and it prints
 its progress. Later runs read only what is new, in a second or two. Then run
 `kuakgan summary`, which gives the main points in a few kilobytes of JSON, and
 tell the user in a few plain sentences what it shows: tokens and estimated
