@@ -179,6 +179,84 @@ prints the address instead: give it to the user. Tell the user that:
 
 To stop it: `kuakgan dashboard --stop`.
 
+#### A shortcut and opening at login (ask the user)
+
+Ask the user whether they want a Kuakgan shortcut (desktop, Start menu or
+Dock) and whether the dashboard should open by itself when they log in. Do only
+what they say yes to. Every shortcut runs the same `dashboard` command, which
+starts Kuakgan if needed and otherwise just opens the window, and every one
+uses the Kuakgan logo shipped next to `kuakgan.py`. Fill in the full paths
+below; `PYTHON` is the full path of the Python you used, such as the output of
+`python3 -c "import sys; print(sys.executable)"`.
+
+**Windows** (PowerShell; `pythonw.exe` sits next to `python.exe` and runs
+without a console window):
+
+```
+$py = 'C:\FULL\PATH\pythonw.exe'; $dir = 'C:\Users\NAME\kuakgan'
+function New-Kuakgan($file) {
+  $s = (New-Object -ComObject WScript.Shell).CreateShortcut($file)
+  $s.TargetPath = $py; $s.Arguments = "`"$dir\kuakgan.py`" dashboard"
+  $s.WorkingDirectory = $dir; $s.IconLocation = "$dir\logo.ico"; $s.Save()
+}
+New-Kuakgan "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Kuakgan.lnk"
+New-Kuakgan "$([Environment]::GetFolderPath('Desktop'))\Kuakgan.lnk"
+New-Kuakgan "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Kuakgan.lnk"
+```
+
+The lines are the Start menu, the desktop and opening at login; leave out the
+ones the user did not want. Windows does not let programs pin to the taskbar:
+tell the user to open Start, find Kuakgan, right-click it and choose **Pin to
+taskbar**.
+
+**macOS** (Terminal) makes a small Kuakgan app with the logo:
+
+```
+osacompile -o ~/Applications/Kuakgan.app -e 'do shell script "PYTHON /Users/NAME/kuakgan/kuakgan.py dashboard > /dev/null 2>&1 &"'
+cp /Users/NAME/kuakgan/logo.icns ~/Applications/Kuakgan.app/Contents/Resources/applet.icns
+touch ~/Applications/Kuakgan.app
+```
+
+To open it at login:
+`osascript -e 'tell application "System Events" to make login item at end with properties {path:"'$HOME'/Applications/Kuakgan.app", hidden:false}'`.
+For the Dock, tell the user to drag Kuakgan from Applications (in their home
+folder) onto the Dock.
+
+**Linux** (a desktop entry, which menus, docks and the desktop all use; the
+window carries the class `Kuakgan`, so it shows the same logo):
+
+```
+mkdir -p ~/.local/share/applications
+cat > ~/.local/share/applications/kuakgan.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=Kuakgan
+Comment=Where your Claude Code and Codex tokens go
+Exec=PYTHON /home/NAME/kuakgan/kuakgan.py dashboard
+Icon=/home/NAME/kuakgan/logo.svg
+StartupWMClass=Kuakgan
+Terminal=false
+Categories=Utility;
+EOF
+```
+
+This puts Kuakgan in the application menu. To open it at login:
+
+```
+mkdir -p ~/.config/autostart && cp ~/.local/share/applications/kuakgan.desktop ~/.config/autostart/
+```
+
+On the desktop (the last line is for GNOME, the Ubuntu desktop):
+
+```
+desk="$(xdg-user-dir DESKTOP)"
+cp ~/.local/share/applications/kuakgan.desktop "$desk/" && chmod +x "$desk/kuakgan.desktop"
+gio set "$desk/kuakgan.desktop" metadata::trusted true
+```
+
+To keep it in the dock or panel, tell the user to open Kuakgan from the
+application menu, right-click its icon and choose **Add to Favorites** or **Pin**.
+
 ### 5. Let the agents use it (Agent, after asking the user)
 
 This is what makes Kuakgan useful every day rather than once. Ask the user
@@ -303,6 +381,22 @@ screenshots show no project, session or machine names, commands or file names.
 - **Numbers look off after an update.** Run `kuakgan index --rebuild`.
 - **The dashboard does not open.** Another program may use port 8766; start it
   with `--port 8780`.
+- **Screenshot does nothing.** It needs Edge or Chrome; without them, take a
+  screenshot of the window the usual way.
+- **The tips do not appear in new sessions.** Run the hook's command yourself;
+  if it prints nothing, there is nothing to say yet for that project. Check
+  that the Python path in `settings.json` still exists.
+
+## Removing Kuakgan
+
+Nothing is installed outside its folder, and nothing on the other computers.
+To remove it: run `kuakgan dashboard --stop`; take the Kuakgan block out of
+`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` and the `SessionStart` hook out
+of `~/.claude/settings.json`, if they were added; delete any shortcuts (on
+Windows the `Kuakgan.lnk` files, on macOS `~/Applications/Kuakgan.app` and its
+login item, on Linux `kuakgan.desktop` in `~/.local/share/applications`,
+`~/.config/autostart` and on the desktop); then delete the `kuakgan` folder,
+which holds the index too. The logs it read are left as they were.
 
 ## Why the name
 

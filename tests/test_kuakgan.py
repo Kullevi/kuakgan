@@ -295,7 +295,7 @@ class ClassifyTest(unittest.TestCase):
 
     def test_kinds(self):
         self.assertEqual(self.kind("cd /x && tail -n 8 run.log; tail inbox.md"), "observe")
-        self.assertEqual(self.kind("ssh m1 'tail -n 20 /tmp/lane.log'"), "observe")
+        self.assertEqual(self.kind("ssh build-pc 'tail -n 20 /tmp/lane.log'"), "observe")
         self.assertEqual(self.kind("cd /x && git status"), "run")
         self.assertEqual(self.kind("sleep 120; tail -5 a.log"), "wait")
         self.assertEqual(self.kind("until grep -q done x.log; do sleep 5; done"), "wait")
