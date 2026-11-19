@@ -1596,7 +1596,9 @@ def start_in_background(port: int, open_browser: bool) -> int:
         return 0
     update_index(pull=None)  # the first read can take minutes; do it here, where progress shows
     cmd = [sys.executable, str(HERE / "kuakgan.py"), "dashboard", "--port", str(port), "--no-browser"]
-    options = ({"creationflags": 0x00000008 | 0x00000200}  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    # A hidden console of its own (CREATE_NO_WINDOW), not none (DETACHED_PROCESS): the
+    # processes it starts, such as readers and ssh, inherit it instead of each opening a window.
+    options = ({"creationflags": 0x08000000 | 0x00000200}  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
                if sys.platform == "win32" else {"start_new_session": True})
     subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      close_fds=True, **options)
