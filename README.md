@@ -73,7 +73,9 @@ terminals. Do the steps yourself; ask the user only where a step says so.
 
 ### 1. Python and the files
 
-Kuakgan needs **Python 3.9 or newer** and nothing else. Try `python3 --version`,
+Kuakgan needs **Python 3.9 or newer** and nothing else. You, the agent, check
+for it and install it for the user if it is missing; the user should not have
+to do anything but say yes. Try `python3 --version`,
 then `python --version` and `py -3 --version`. On Windows, `python3` and
 sometimes `python` are a Microsoft Store placeholder that prints a message
 instead of a version; use whichever command prints a real version.
@@ -81,7 +83,12 @@ instead of a version; use whichever command prints a real version.
 - Missing on Windows: tell the user this installs Python and accepts the
   winget/Microsoft terms, and with their OK run
   `winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements`.
-  Python is often only found after the terminal or app is restarted.
+  A new install is often not on the PATH until the terminal or app restarts,
+  so do not ask for a restart: try `py -3 --version` (the launcher usually
+  works at once), or call Python by its full path,
+  `%LOCALAPPDATA%\Programs\Python\Python312\python.exe` (in Git Bash
+  `"$LOCALAPPDATA/Programs/Python/Python312/python.exe"`). Use that command
+  or full path in every later step, including the hook in `settings.json`.
 - Missing on macOS: `xcode-select --install` opens a window where the user
   clicks **Install**.
 
