@@ -17,6 +17,7 @@ import contextlib
 import difflib
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -821,6 +822,8 @@ def update_index(quiet: bool = False, only: list[str] | None = None, pull: bool 
     jobs = [(p, src, prices) for p, src, _, _ in sorted(todo, key=lambda t: -t[2])]
     meta = {p: (src, size, mtime) for p, src, size, mtime in todo}
     workers = min(os.cpu_count() or 2, 8) if total_bytes > 30_000_000 and len(todo) > 1 else 1
+    if workers > 1:
+        windowless_workers()
     results = (concurrent.futures.ProcessPoolExecutor(workers).map(parse_file, jobs, chunksize=1)
                if workers > 1 else map(parse_file, jobs))
     last_print = time.time()
@@ -890,7 +893,8 @@ def run_remote(m: dict, request: dict, python: str, timeout: float | None):
     # While results stream in, nothing reads stderr, so it must not fill a pipe and stall.
     proc = subprocess.Popen(ssh_command(m, f"{python} -c '{REMOTE_BOOT}'"), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE if request["action"] == "list" else subprocess.DEVNULL)
+                            stderr=subprocess.PIPE if request["action"] == "list" else subprocess.DEVNULL,
+                            **hidden())
     def send():
         with contextlib.suppress(OSError):
             proc.stdin.write(payload.encode())
@@ -922,7 +926,8 @@ def remote_python(m: dict) -> str | None:
     for python in ("python3", "python"):
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             done = subprocess.run(ssh_command(m, f"{python} -c 'import sys;print(sys.version_info[:2]>=(3,9))'"),
-                                  capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL)
+                                  capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL,
+                                  **hidden())
             if done.stdout.strip() == "True":
                 return python
     return None
@@ -1062,6 +1067,23 @@ MAX_DAYS = 30
 
 def period(days: float | None) -> float:
     return min(days or MAX_DAYS, MAX_DAYS)
+
+
+def hidden(**options) -> dict:
+    """Options for every helper process Kuakgan starts: on Windows without a window of
+    its own, however Kuakgan itself was started (a console, a shortcut, pythonw)."""
+    if sys.platform == "win32":
+        options["creationflags"] = options.get("creationflags", 0) | 0x08000000  # CREATE_NO_WINDOW
+    return options
+
+
+def windowless_workers() -> None:
+    """Reader processes on Windows run under pythonw, which has no console, so none of
+    them opens a window even when Kuakgan runs without one."""
+    if sys.platform == "win32":
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        if pythonw.exists():
+            multiprocessing.set_executable(str(pythonw))
 
 
 def since_ts(days: float | None) -> float:
@@ -1458,7 +1480,7 @@ def screenshot(url: str, width: int, height: int) -> bytes | None:
                         f"--user-data-dir={os.path.join(folder, 'profile')}",
                         f"--window-size={width},{height}", "--force-device-scale-factor=2",
                         "--virtual-time-budget=8000", f"--screenshot={out}", url],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90, **hidden())
         return Path(out).read_bytes() if os.path.exists(out) else None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1598,7 +1620,7 @@ def start_in_background(port: int, open_browser: bool) -> int:
     cmd = [sys.executable, str(HERE / "kuakgan.py"), "dashboard", "--port", str(port), "--no-browser"]
     # A hidden console of its own (CREATE_NO_WINDOW), not none (DETACHED_PROCESS): the
     # processes it starts, such as readers and ssh, inherit it instead of each opening a window.
-    options = ({"creationflags": 0x08000000 | 0x00000200}  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    options = (hidden(creationflags=0x00000200)  # CREATE_NEW_PROCESS_GROUP
                if sys.platform == "win32" else {"start_new_session": True})
     subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      close_fds=True, **options)
