@@ -1,9 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <!-- Kuakgan: Kullevi's mark inside a tree's crown, a ring open at the bottom where a trunk
-       would rise (a kuakgan in Moon's books is a tree-herd). Girdish's ring opens at the top. -->
+       would rise (a kuakgan in Moon's books is a tree-herd). Same size as Girdish, whose
+       ring opens at the top. -->
   <style>g { color: #0f9d6b } @media (prefers-color-scheme: dark) { g { color: #2fd08b } }</style>
   <g fill="currentColor">
-    <path d="M42,23.09 A30,30 0 1 0 58,23.09 L58,40 A8,8 0 0 1 42,40 Z" transform="translate(50 50) scale(.56) translate(-50 -52)"/>
-    <path d="M32,81.2 A36,36 0 1 1 68,81.2" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+    <path d="M42,23.09 A30,30 0 1 0 58,23.09 L58,40 A8,8 0 0 1 42,40 Z" transform="translate(50 50) scale(.62) translate(-50 -52)"/>
+    <path d="M29,82.5 A39,39 0 1 1 71,82.5" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
   </g>
 </svg>
