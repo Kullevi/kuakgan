@@ -1016,6 +1016,7 @@ def machines_status() -> list[dict]:
 FIXES = {
     "polling": {
         "title": "Busy polling",
+        "short": "Wait for long commands; do not keep checking.",
         "what": "The agent checked on running work again and again (tail, cat, ps, wait) "
                 "instead of waiting for it. Every check is a full model turn.",
         "claude": "Start long commands with run_in_background and wait for the notification that "
@@ -1029,6 +1030,7 @@ FIXES = {
     },
     "rereads": {
         "title": "Files read again and again",
+        "short": "Read each file once; note key facts in CLAUDE.md.",
         "what": "The same unchanged file was read three or more times in one session. Each read "
                 "puts the whole file into the context again.",
         "claude": "Read a file once and work from it. If the agent keeps needing the same facts, "
@@ -1036,6 +1038,7 @@ FIXES = {
     },
     "big_outputs": {
         "title": "Very large tool output",
+        "short": "Ask for less output: tail, --quiet, line ranges.",
         "what": "Single tool results of more than 10,000 tokens. They stay in the context, and "
                 "every later turn pays for them again.",
         "claude": "Ask for less: `| tail -n 50`, `--quiet`, a line range when reading a file, or "
@@ -1044,6 +1047,7 @@ FIXES = {
     },
     "failures": {
         "title": "Failed commands",
+        "short": "Run `kuakgan check` before each task.",
         "what": "Commands that failed. Many failures repeat across sessions: the same wrong "
                 "command, path or tool, fixed again each time.",
         "claude": "Run `kuakgan check` at the start of a task: it lists the commands that failed "
@@ -1052,6 +1056,7 @@ FIXES = {
     },
     "scripts": {
         "title": "The same helper script, rewritten",
+        "short": "Save recurring scripts as files agents run.",
         "what": "Inline scripts (`python - <<PY`, `node -e`) with the same body written in "
                 "several sessions. Each time the model types the whole script again.",
         "claude": "Save scripts that recur as files in the repository (for example under "
@@ -1117,7 +1122,7 @@ def summarize_findings(db, days, project) -> list[dict]:
         fx = FIXES[kind]
         sources = Counter(r["source"] for r in rs)
         worst = sorted(rs, key=lambda r: -(r["cost"] or 0) - r["calls"] * 1e-6)[:5]
-        item = {"kind": kind, "title": fx["title"], "what": fx["what"],
+        item = {"kind": kind, "title": fx["title"], "short": fx["short"], "what": fx["what"],
                 "sessions": len(rs), "calls": sum(r["calls"] for r in rs),
                 "share_of_calls": round(sum(r["calls"] for r in rs) / all_calls, 3),
                 "cost": None if kind == "big_outputs" else r2(sum(r["cost"] or 0 for r in rs)),
@@ -1133,7 +1138,8 @@ def summarize_findings(db, days, project) -> list[dict]:
     scripts = repeated_scripts(db, days, project)
     if scripts:
         n = sum(g["times"] - 1 for g in scripts)
-        out.append({"kind": "scripts", "title": FIXES["scripts"]["title"], "what": FIXES["scripts"]["what"],
+        out.append({"kind": "scripts", "title": FIXES["scripts"]["title"], "short": FIXES["scripts"]["short"],
+                    "what": FIXES["scripts"]["what"],
                     "sessions": len({s for g in scripts for s in g["session_ids"]}), "calls": n,
                     "share_of_calls": round(n / all_calls, 3),
                     "cost": r2(sum(g["cost"] for g in scripts)), "tokens": sum(g["tokens"] for g in scripts),
@@ -1229,7 +1235,7 @@ def summary(days=30, project=None, sessions_limit=10) -> dict:
         m["priced"] = price_for(m["model"], load_prices()) is not None
         m["cost"] = r2(m["cost"]) if m["priced"] else None
     days_rows = db.execute(
-        f"SELECT substr(u.hour, 1, 10) day, u.model, SUM(u.input + u.cache_read + u.cache_write + u.output) "
+        f"SELECT substr(u.hour, 1, {13 if days <= 1 else 10}) day, u.model, SUM(u.input + u.cache_read + u.cache_write + u.output) "
         f"tokens, SUM(u.output) output, SUM(u.cost) cost FROM usage u, sessions s WHERE {uw} "
         f"GROUP BY day, u.model ORDER BY day", up).fetchall()
     projects = [dict(r) for r in db.execute(
@@ -1238,6 +1244,7 @@ def summary(days=30, project=None, sessions_limit=10) -> dict:
         f"MAX(s.last_ts) last_ts, GROUP_CONCAT(DISTINCT s.source) sources, "
         f"GROUP_CONCAT(DISTINCT s.machine) machines FROM usage u, sessions s WHERE {uw} "
         f"GROUP BY s.project ORDER BY cost DESC, tokens DESC LIMIT 25", up)]
+    project_count = db.execute(f"SELECT COUNT(DISTINCT s.project) FROM usage u, sessions s WHERE {uw}", up).fetchone()[0]
     for p in projects:
         p["cost"] = r2(p["cost"])
     top = [session_row(r) for r in db.execute(
@@ -1260,7 +1267,8 @@ def summary(days=30, project=None, sessions_limit=10) -> dict:
     wasted_calls = sum(f["calls"] for f in findings if f["kind"] != "big_outputs")
     return {
         "period_days": days, "project": project,
-        "totals": {"sessions": t["sessions"], "tokens": tokens, "input": sums["input"],
+        "totals": {"sessions": t["sessions"],
+                   "projects": project_count, "tokens": tokens, "input": sums["input"],
                    "cache_read": sums["cache_read"], "cache_write": sums["cache_write"],
                    "output": sums["output"], "model_calls": sums["requests"],
                    "tool_calls": t["calls"] or 0, "failed_tool_calls": t["errors"] or 0,
@@ -1276,7 +1284,8 @@ def summary(days=30, project=None, sessions_limit=10) -> dict:
                        "calls and waste count the sessions active in it.",
         "models": models,
         "machines": machines,
-        "days": [dict(r) for r in days_rows],
+        "days": [dict(r) for r in days_rows],  # per hour (YYYY-MM-DDTHH, UTC) when the period is a day
+        "step": "hour" if days <= 1 else "day",
         "projects": projects,
         "top_sessions": top,
         "findings": findings,
@@ -1293,7 +1302,7 @@ def brief(answer: dict) -> dict:
         "machines": answer["machines"],
         "top_sessions": [keep(s, ("id", "project", "title", "source", "calls", "tokens", "cost", "last_ts"))
                          for s in answer["top_sessions"][:5]],
-        "findings": [{**keep(f, ("kind", "title", "sessions", "calls", "share_of_calls", "cost", "tokens", "fix")),
+        "findings": [{**keep(f, ("kind", "title", "short", "sessions", "calls", "share_of_calls", "cost", "tokens", "fix")),
                       **({"repeated": f["repeated"][:3]} if f.get("repeated") else {})}
                      for f in answer["findings"]],
         "more": "Run `summary --full` for every day, all projects and where each finding happened.",
@@ -1462,7 +1471,7 @@ def open_window(url: str) -> None:
         with contextlib.suppress(OSError):
             # On Linux the window class ties the window to kuakgan.desktop and its icon.
             extra = ["--class=Kuakgan"] if sys.platform.startswith("linux") else []
-            subprocess.Popen([browser, f"--app={url}", "--window-size=1500,1000", *extra],
+            subprocess.Popen([browser, f"--app={url}", "--window-size=1440,790", *extra],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
     webbrowser.open(url)
@@ -1547,11 +1556,11 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
                     self.send_error(403)
                     return
                 try:
-                    width, height = (min(4000, max(300, int(q.get(k) or d))) for k, d in (("w", 1500), ("h", 950)))
+                    width, height = (min(4000, max(300, int(q.get(k) or d))) for k, d in (("w", 1200), ("h", 630)))
                 except ValueError:
                     self.send_error(400)
                     return
-                view = {k: q[k] for k in ("days", "project", "private", "metric") if q.get(k)}
+                view = {k: q[k] for k in ("days", "project", "private", "metric", "theme") if q.get(k)}
                 with one_shot:
                     body = screenshot(url + "?" + urlencode({**view, "shot": "1"}), width, height)
                 if body is None:

@@ -141,6 +141,13 @@ class KuakganTest(unittest.TestCase):
         ids = {s["id"] for s in kuakgan.list_sessions(days=30, limit=10)}
         self.assertEqual(ids, {"s1", "s2", "s2/agent-abc", "codex-1"})
 
+    def test_a_day_is_shown_by_the_hour(self):
+        day = kuakgan.summary(days=1)
+        self.assertEqual(day["step"], "hour")
+        self.assertTrue(all(len(r["day"]) == 13 for r in day["days"]))
+        self.assertEqual(kuakgan.summary(days=7)["step"], "day")
+        self.assertTrue(all(f.get("short") for f in day["findings"]))
+
     def test_period_is_at_most_thirty_days(self):
         for days in (0, None, 90):
             self.assertEqual(kuakgan.summary(days=days)["period_days"], 30)

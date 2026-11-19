@@ -12,7 +12,10 @@ It also helps the agents themselves. `kuakgan check` tells an agent, at the
 start of a task, which commands failed in this project before and what worked
 instead, so it gets them right the first time.
 
-![The Kuakgan dashboard](docs/dashboard.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
+  <img src="docs/dashboard.png" alt="The Kuakgan dashboard: estimated cost, tokens per day by model, models, the biggest waste and projects">
+</picture>
 
 **To get started, give the link to this page to Claude or Codex and ask it to
 set up Kuakgan for you.** There is nothing to configure: no account, no API
@@ -48,7 +51,7 @@ taken out of our own setup and made general.
 | **Usage** | Tokens per day by model, cost at API list prices, cache use, and which projects and sessions used the most. |
 | **Waste** | Busy polling, files read again without having changed, the same inline script written in several sessions, commands that failed (and those that failed in several sessions), and very large tool outputs. Each with how much it cost and how to fix it. |
 | **For agents** | `kuakgan check`: earlier mistakes in this project and what worked instead, files earlier sessions kept re-reading, and how the current session is doing. |
-| **To share** | The whole dashboard fits in one window. The Screenshot button copies a picture of it; Private hides project, session and machine names first. |
+| **To share** | The dashboard is one 1200×630 view, the size of a link preview. The Screenshot button copies it as a picture; Private hides project, session and machine names first. |
 
 Costs are estimates at API list prices. If you use a subscription you pay a flat
 fee instead; the estimate shows what the same work would cost through the API.
@@ -175,7 +178,7 @@ prints the address instead: give it to the user. Tell the user that:
 - the period buttons and the project menu change what is shown;
 - "Private" replaces project, session and machine names with numbers, so
   the window can be shown or shared;
-- "Screenshot" copies a picture of the window, ready to paste into a post;
+- "Screenshot" copies a 1200×630 picture of the view, ready to paste into a post;
 - they can ask you to "open the Kuakgan dashboard" again later.
 
 To stop it: `kuakgan dashboard --stop` (with the same `--port` if it was

@@ -1,7 +1,8 @@
 <!doctype html>
-<!-- Kuakgan dashboard: one window with tokens and cost per day, models, waste with its
-     fixes, projects and sessions. Served by `kuakgan.py dashboard` on localhost; reads
-     /data.json. The cards fill the window, so a screenshot of it shows everything. -->
+<!-- Kuakgan dashboard: one 1200x630 frame (the ratio of a link preview image) with the
+     cost, tokens per day by model, models, the biggest waste and projects, scaled to the
+     window. Served by `kuakgan.py dashboard` on localhost; reads /data.json. The
+     Screenshot button has the server draw the same frame. -->
 <html lang="en" translate="no">
 <head>
 <meta charset="utf-8">
@@ -10,164 +11,184 @@
 <title>Kuakgan</title>
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
 <style>
+/* One visual system: type 12/14/16/20/28/48, an 8 px grid,
+   16 px cards with 24 px padding and a 1 px border, and one series palette. */
 :root {
-  --page: #f3f4f7; --card: #ffffff; --line: #e5e7eb; --line-strong: #d1d5db;
-  --text: #111418; --text-2: #3f4650; --text-3: #6b7380; --track: #eceef2;
-  --accent: #0f9d6b; --accent-soft: #e6f6ef; --amber: #b86e00; --amber-soft: #fdf4e3;
-  --gap: 14px; --pad: 16px;
+  --bg: #f6f7f9; --surface: #ffffff; --border: #e6e8ec; --track: #eef0f3;
+  --text: #111418; --muted: #5d6673; --faint: #8b929d;
+  --accent: #0f9d6b; --warn: #c27a12; --error: #d0453b;
+  --s1: #0f9d6b; --s2: #3b6fe0; --s3: #e0882b; --s4: #8a5cf0; --s5: #e0457b; --s6: #1aa6b8; --s7: #9aa3ad;
+  color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root { --page: #0f1115; --card: #171a20; --line: #262a33; --line-strong: #353a45;
-    --text: #eef0f3; --text-2: #c3c8d0; --text-3: #8b929d; --track: #232731;
-    --accent: #2fd08b; --accent-soft: #12291f; --amber: #f0a43a; --amber-soft: #2b2112; }
+:root[data-theme="dark"] {
+  --bg: #0d1014; --surface: #151a20; --border: #252c35; --track: #1e242c;
+  --text: #eef1f4; --muted: #8b95a3; --faint: #677180;
+  --accent: #2fd08b; --warn: #e0a043; --error: #f0675c;
+  --s1: #2fd08b; --s2: #6b93f0; --s3: #f0a352; --s4: #a585f5; --s5: #f06a95; --s6: #3cc3d4; --s7: #b4bcc5;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; min-height: 100%; background: var(--page); color: var(--text); }
-/* Text follows the window, so a bigger window reads bigger and everything still fits. */
-body { font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
-  font-size: clamp(11.5px, min(.95vw, 1.55vh), 19px); line-height: 1.35;
-  -webkit-font-smoothing: antialiased; padding: var(--pad); }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+body { font: 400 14px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased; overflow: hidden; }
 .num { font-variant-numeric: tabular-nums; }
 
-/* Three columns and two rows that fill the window; narrow windows get one scrolling column. */
-.grid { display: grid; gap: var(--gap); height: calc(100vh - 2 * var(--pad)); min-height: 600px;
-  grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
-.wide { grid-column: span 2; }
-@media (max-width: 900px) {
-  .grid { height: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-auto-rows: minmax(340px, auto); }
-  .wide { grid-column: auto; }
-  body { font-size: 13px; }
-}
+/* The frame is designed at 1200x630 and scaled to fit the window, centred. */
+.frame { position: absolute; left: 50%; top: 50%; width: 1200px; height: 630px; padding: 32px;
+  transform: translate(-50%, -50%) scale(var(--scale, 1)); display: grid; gap: 24px;
+  grid-template-rows: 40px minmax(0, 1fr); }
+header { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.brand { display: flex; align-items: center; gap: 12px; flex: none; }
+.brand img { width: 32px; height: 32px; }
+.brand h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+.scope { color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.spacer { flex: 1; }
+.site { color: var(--muted); font-size: 14px; display: none; }
+.body { display: grid; gap: 24px; min-height: 0; grid-template-columns: 360px minmax(0, 1fr); }
+.right { display: grid; gap: 24px; min-height: 0; grid-template-rows: minmax(0, 1fr) 200px; }
+.pair { display: grid; gap: 24px; grid-template-columns: 1fr 1fr; min-height: 0; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px;
+  min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.card-head { display: flex; align-items: center; gap: 16px; height: 24px; flex: none; margin-bottom: 16px; }
+.list { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 8px; }
+.more, .empty, .count { color: var(--muted); font-size: 12px; }
 
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; min-width: 0; min-height: 0;
-  box-shadow: 0 1px 2px rgba(16,24,40,.04), 0 3px 10px rgba(16,24,40,.04);
-  display: flex; flex-direction: column; padding: 1em 1.15em; overflow: hidden; }
-.head { display: flex; align-items: center; gap: .6em; flex: none; margin-bottom: .7em; }
-.head h2 { margin: 0; font-size: .78em; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); font-weight: 650; }
-.head .spacer { flex: 1; }
-.scroll { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
-.empty { color: var(--text-3); font-size: .9em; }
-.muted { color: var(--text-3); }
-
-/* Summary card */
-.brand { display: flex; align-items: center; gap: .55em; }
-.brand img { width: 2em; height: 2em; }
-.brand h1 { margin: 0; font: 700 1.6em/1 "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif; letter-spacing: -.01em; }
-.brand .period { color: var(--text-3); font-size: .9em; margin-left: .2em; }
-.tools { display: flex; align-items: center; gap: .6em; flex-wrap: wrap; flex: none; font-size: .85em; color: var(--text-2); }
-.seg { display: inline-flex; background: var(--track); border-radius: .6em; padding: .18em; }
-.seg button { border: 0; background: none; color: var(--text-2); font: inherit; font-weight: 600; padding: .25em .7em; border-radius: .45em; cursor: pointer; }
-.seg button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
-select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line-strong); border-radius: .5em; padding: .2em .4em; max-width: 13em; }
-.switch { position: relative; width: 2.3em; height: 1.3em; flex: none; cursor: pointer; }
-.switch input { opacity: 0; width: 0; height: 0; position: absolute; }
-.switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--line-strong); transition: background .15s; }
-.switch span::after { content: ""; position: absolute; top: .15em; left: .15em; width: 1em; height: 1em; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s; }
-.switch input:checked + span { background: var(--accent); }
-.switch input:checked + span::after { transform: translateX(1em); }
-.hide { display: inline-flex; align-items: center; gap: .45em; cursor: pointer; user-select: none; }
-.shot { display: inline-flex; align-items: center; gap: .35em; font: inherit; color: inherit; background: var(--card);
-  border: 1px solid var(--line-strong); border-radius: 999px; padding: .2em .75em; cursor: pointer; }
-.shot:hover { background: var(--page); } .shot:disabled { cursor: progress; opacity: .7; }
-.shot svg { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+/* Controls */
+.tools { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.seg { display: inline-flex; background: var(--track); border-radius: 8px; padding: 2px; }
+.seg button { white-space: nowrap; border: 0; background: none; color: var(--muted); font: inherit; font-weight: 600; height: 24px; padding: 0 10px; border-radius: 6px; cursor: pointer; }
+.seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+select, .btn { font: inherit; font-weight: 600; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; height: 28px; padding: 0 10px; cursor: pointer; max-width: 180px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover, select:hover { border-color: var(--faint); }
+.btn:disabled { cursor: progress; opacity: .7; }
+.btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+.btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .shot-mode .tools { display: none; }
-.kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.4em 1.2em; margin: 1em 0; flex: 1; align-content: center; }
-.kpi .label { color: var(--text-3); font-size: .72em; text-transform: uppercase; letter-spacing: .05em; font-weight: 650; }
-.kpi .value { font: 650 2.6em/1.1 "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif; letter-spacing: -.02em; margin-top: .1em; }
-.kpi .sub { color: var(--text-3); font-size: .8em; }
-.kpi.waste .value { color: var(--amber); }
-.credit { flex: none; font-size: .74em; color: var(--text-3); line-height: 1.4; border-top: 1px solid var(--line); padding-top: .6em; }
-.credit a { color: var(--text-2); font-weight: 650; text-decoration: none; }
+.shot-mode .site { display: block; }
+
+/* Summary: the headline, three numbers and the models, whose colours are the chart's legend */
+.headline { font-size: 48px; font-weight: 650; line-height: 1.1; letter-spacing: -.02em; margin-top: 8px; }
+.subline { color: var(--muted); font-size: 14px; margin-top: 8px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 24px 0; padding: 16px 0;
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); flex: none; }
+.stat b { display: block; font-size: 20px; font-weight: 650; line-height: 1.2; }
+.stat span { color: var(--muted); font-size: 12px; }
+.stat.warn b { color: var(--warn); }
+.strip { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; margin: 8px 0 16px; flex: none; background: var(--track); }
+.strip i { display: block; height: 100%; }
+.item { display: flex; align-items: center; gap: 8px; height: 20px; flex: none; font-size: 14px; }
+.dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.item .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item .v { color: var(--muted); white-space: nowrap; }
+.item .v b { color: var(--text); font-weight: 600; }
 
 /* Chart */
 #chart { flex: 1; min-height: 0; }
-#chart svg { display: block; }
-#chart svg text { fill: var(--text-3); font-size: .78em; }
-.legend { display: flex; flex-wrap: wrap; gap: .3em 1em; margin-top: .5em; font-size: .8em; color: var(--text-2); flex: none; }
-.legend span::before { content: ""; display: inline-block; width: .7em; height: .7em; border-radius: .2em; background: var(--c); margin-right: .4em; }
+#chart svg { display: block; overflow: visible; }
+#chart text { fill: var(--faint); font-size: 12px; }
 
-/* Rows with a bar: models, machines, projects, sessions */
-.rows { display: grid; gap: .55em; }
-.row .line { display: flex; gap: .6em; align-items: baseline; }
-.row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.row .name small { font-weight: 400; color: var(--text-3); }
-.row .v { color: var(--text-2); white-space: nowrap; }
-.row .v b { color: var(--text); font-weight: 650; }
-.row .meta { color: var(--text-3); font-size: .8em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bar { height: .35em; background: var(--track); border-radius: 999px; overflow: hidden; margin-top: .25em; }
-.bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
-h3 { margin: .9em 0 .5em; font-size: .72em; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); font-weight: 650; }
-h3:first-child { margin-top: 0; }
+/* Waste and projects */
+.finding { flex: none; }
+.finding .top { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
+.finding .title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.finding .cost { color: var(--warn); font-weight: 650; white-space: nowrap; }
+.finding .tip { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+code { font: 600 1em ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--text); }
+.bar { height: 4px; background: var(--track); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+.place { flex: none; }
+.place .item { height: 20px; }
 
-/* Waste */
-.finding { padding: .6em 0; border-top: 1px solid var(--line); }
-.finding:first-child { border-top: 0; padding-top: 0; }
-.finding .top { display: flex; gap: .6em; align-items: baseline; }
-.finding .title { font-weight: 650; flex: 1; }
-.finding .stats { color: var(--text-2); font-size: .85em; white-space: nowrap; }
-.finding .stats b { color: var(--amber); }
-.fix { margin-top: .3em; color: var(--text-2); font-size: .85em; }
-.fix b { color: var(--accent); }
-code { font: .92em/1.4 ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--track); padding: 0 .3em; border-radius: .3em; word-break: break-all; }
-
-/* While new numbers load: the old ones dim, and a moving bar says so. */
-body.busy .grid .card:not(.summary) { opacity: .55; transition: opacity .15s .1s; }
-body::after { content: ""; position: fixed; top: 0; left: 0; height: 3px; width: 0; background: var(--accent); z-index: 10; }
+/* While new numbers load: a moving bar along the top. */
+body::after { content: ""; position: fixed; top: 0; left: 0; height: 2px; width: 0; background: var(--accent); z-index: 10; }
 body.busy::after { animation: loadbar 1.6s ease-in-out infinite; }
 @keyframes loadbar { 0% { left: 0; width: 0; } 50% { left: 20%; width: 60%; } 100% { left: 100%; width: 0; } }
-.loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--page); color: var(--text-2); z-index: 5; text-align: center; }
-.status { color: var(--text-3); font-size: .8em; }
-.status.bad { color: #c42b2b; font-weight: 650; }
+.loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); color: var(--muted); z-index: 5; text-align: center; }
+.status.bad { color: var(--error); font-weight: 600; }
+
+/* A phone or a narrow window: the cards stack and the page scrolls. */
+body.narrow { overflow: auto; }
+.narrow .frame { position: static; transform: none; width: auto; height: auto; padding: 16px; grid-template-rows: auto auto; }
+.narrow header { flex-wrap: wrap; }
+.narrow header > .tools { flex-wrap: wrap; width: 100%; }
+.narrow .body, .narrow .pair { grid-template-columns: minmax(0, 1fr); }
+.narrow .right { grid-template-rows: 280px auto; }
+.narrow .list { overflow: visible; }
 </style>
 </head>
 <body>
-<div class="loading" id="loading"><div>Reading your Claude Code and Codex logs…<br><span class="muted">The first time can take a few minutes; after that it is quick.</span></div></div>
-<main class="grid">
-  <section class="card summary">
-    <div class="head">
-      <div class="brand"><img src="/logo.svg" alt=""><h1>Kuakgan</h1><span class="period" id="period-text"></span></div>
-      <span class="spacer"></span><span class="status num" id="status" aria-live="polite"></span>
-    </div>
+<div class="loading" id="loading"><div>Reading your Claude Code and Codex logs…<br><span style="font-size:12px">The first time can take a few minutes; after that it is quick.</span></div></div>
+<main class="frame">
+  <header>
+    <div class="brand"><img src="/logo.svg" alt=""><h1>Kuakgan</h1></div>
+    <span class="scope" id="scope"></span>
+    <span class="spacer"></span>
     <div class="tools">
+      <span class="status num" id="status" aria-live="polite"></span>
       <div class="seg" id="period"><button data-days="1">Today</button><button data-days="7">7 days</button><button data-days="30">30 days</button></div>
       <select id="project" aria-label="Project"><option value="">All projects</option></select>
-      <label class="hide" title="Hides project, session and machine names, commands and file names, for sharing"><span class="switch"><input type="checkbox" id="private"><span></span></span>Private</label>
-      <button class="shot" id="shot" type="button" title="Copies a picture of this window, ready to paste into a post or a chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.4"/></svg><span id="shot-text">Screenshot</span></button>
+      <button class="btn" id="private" type="button" aria-pressed="false" title="Numbers projects, sessions and machines instead of naming them, so the window can be shown">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>Private</button>
+      <button class="btn" id="shot" type="button" title="Copies a 1200x630 picture of this view, ready to paste into a post or a chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.4"/></svg><span id="shot-text">Screenshot</span></button>
     </div>
-    <div class="kpis" id="kpis"></div>
-    <div class="credit"><a href="https://github.com/Kullevi/kuakgan" target="_blank" rel="noopener">Kuakgan</a> reads Claude Code and Codex logs on this computer; nothing leaves it.
-      Costs are estimates at API list prices. Built by the team behind <a href="https://kullevi.com" target="_blank" rel="noopener">Kullevi</a>.</div>
-  </section>
-
-  <section class="card wide">
-    <div class="head"><h2 id="chart-title">Tokens per day, by model</h2><span class="spacer"></span>
-      <div class="seg tools" id="metric"><button data-m="tokens">Tokens</button><button data-m="cost">Cost</button></div></div>
-    <div id="chart"></div><div class="legend" id="legend"></div>
-  </section>
-
-  <section class="card"><div class="head"><h2>Models</h2></div><div class="scroll" id="models"></div></section>
-  <section class="card"><div class="head"><h2>Waste, and how to fix it</h2></div><div class="scroll" id="findings"></div></section>
-  <section class="card"><div class="head"><h2 id="where-title">Projects</h2></div><div class="scroll" id="where"></div></section>
+    <span class="site">github.com/Kullevi/kuakgan</span>
+  </header>
+  <div class="body">
+    <section class="card">
+      <div class="label">Estimated cost</div>
+      <div class="headline num" id="headline">–</div>
+      <div class="subline num" id="subline"></div>
+      <div class="stats" id="stats"></div>
+      <div class="label">Models</div>
+      <div class="strip" id="strip"></div>
+      <div class="list" id="models"></div>
+    </section>
+    <div class="right">
+      <section class="card">
+        <div class="card-head"><span class="label" id="chart-title">Tokens per day</span><span class="spacer"></span>
+          <div class="seg tools" id="metric"><button data-m="tokens">Tokens</button><button data-m="cost">Cost</button></div></div>
+        <div id="chart"></div>
+      </section>
+      <div class="pair">
+        <section class="card"><div class="card-head"><span class="label">Biggest waste</span><span class="spacer"></span><span class="count" id="findings-count"></span></div><div class="list" id="findings"></div></section>
+        <section class="card"><div class="card-head"><span class="label" id="where-title">Projects</span><span class="spacer"></span><span class="count" id="where-count"></span></div><div class="list" id="where"></div></section>
+      </div>
+    </div>
+  </div>
 </main>
 
 <script>
-const PALETTE = ["#0f9d6b", "#d97706", "#2563eb", "#9333ea", "#db2777", "#0891b2", "#65a30d", "#dc2626", "#7c3aed", "#ca8a04"];
+const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"], OTHER = "--s7";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const query = new URLSearchParams(location.search);
 const shotMode = query.get("shot") === "1";  // the copy the server draws for the Screenshot button
 if (shotMode) document.body.classList.add("shot-mode");
 
-let savedPrivate = false;
-try { savedPrivate = localStorage.getItem("kuakgan.private") === "1"; } catch {}
+const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const store = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 const state = {
   days: [1, 7, 30].includes(+query.get("days")) ? +query.get("days") : 30,
   project: query.get("project") || "",
   metric: query.get("metric") === "cost" ? "cost" : "tokens",
-  private: query.has("private") ? query.get("private") === "1" : savedPrivate,
+  private: query.has("private") ? query.get("private") === "1" : stored("kuakgan.private") === "1",
   data: null,
   projectList: [],  // every project in the period, kept while one of them is chosen
 };
+
+// Light or dark follows the system, unless the address asks for one (the screenshot does).
+const dark = matchMedia("(prefers-color-scheme: dark)");
+function theme() {
+  const t = query.get("theme") || (dark.matches ? "dark" : "light");
+  document.documentElement.dataset.theme = t;
+  return t;
+}
+theme();
+dark.addEventListener("change", () => { theme(); if (state.data) render(); });
 
 function fmt(n) {
   if (n == null) return "–";
@@ -184,26 +205,34 @@ function money(n) {
   return "$" + n.toFixed(2);
 }
 const pct = (x) => (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
-function ago(iso) {
-  if (!iso) return "";
-  const s = (Date.now() - new Date(iso)) / 1000;
-  if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min ago";
-  if (s < 86400) return Math.round(s / 3600) + " h ago";
-  return Math.round(s / 86400) + " d ago";
-}
 const md = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
 
 // Private mode replaces everything that could say what someone works on: project, session
 // and machine names. Model names, numbers and the general fixes stay.
 function names() {
-  const d = state.data, projects = {}, machines = {};
+  const projects = {};
   state.projectList.forEach((p, i) => projects[p] = `Project ${i + 1}`);
-  let n = 0;
-  (d.machines || []).forEach((m) => machines[m.machine] = m.machine === "this computer" ? m.machine : `Machine ${++n}`);
-  return {
-    project: (p) => state.private ? (projects[p] || "Another project") : p,
-    machine: (m) => state.private ? (machines[m] || "Another machine") : m,
-  };
+  return { project: (p) => state.private ? (projects[p] || "Another project") : p };
+}
+
+// The frame keeps its 1200x630 design and is scaled to the window.
+function fit() {
+  const narrow = innerWidth < 720 && !shotMode;
+  document.body.classList.toggle("narrow", narrow);
+  document.documentElement.style.setProperty("--scale", narrow ? 1 : Math.min(innerWidth / 1200, innerHeight / 630));
+}
+
+// Shows as many whole items as fit, and says how many more there are.
+// The count goes in the card's head when one is given, so the list keeps its room.
+function fill(box, items, more, countBox, count) {
+  box.innerHTML = items.join("");
+  if (countBox) countBox.textContent = items.length > 1 ? count(items.length) : "";
+  if (document.body.classList.contains("narrow")) return;
+  let shown = items.length;
+  while (shown > 1 && box.scrollHeight > box.clientHeight + 1) {
+    shown--;
+    box.innerHTML = items.slice(0, shown).join("") + (more ? `<div class="more">${more(items.length - shown)}</div>` : "");
+  }
 }
 
 let loadNumber = 0;
@@ -213,6 +242,11 @@ async function load() {
   if (state.project) q.set("project", state.project);
   document.body.classList.add("busy");
   try {
+    // Opened on one project: the whole list first, so Private mode can number it.
+    if (state.project && !state.projectList.length) {
+      const all = await fetch("/data.json?days=" + state.days, { cache: "no-store" }).then((r) => r.json());
+      state.projectList = all.projects.map((p) => p.project);
+    }
     const res = await fetch("/data.json?" + q, { cache: "no-store" });
     if (!res.ok) throw new Error(res.status);
     const data = await res.json();
@@ -221,7 +255,7 @@ async function load() {
     if (!state.project) state.projectList = data.projects.map((p) => p.project);
     $("loading").style.display = "none";
     $("status").classList.remove("bad");
-    $("status").textContent = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+    $("status").textContent = "";
     render();
   } catch (e) {
     if (mine === loadNumber) { $("status").textContent = "Not answering"; $("status").classList.add("bad"); }
@@ -230,159 +264,151 @@ async function load() {
   }
 }
 
+function colors() {
+  // In the order of the models list, so its first colours are the chart's biggest series.
+  const css = getComputedStyle(document.documentElement);
+  const order = [...new Set([...state.data.models.map((m) => m.model), ...state.data.days.map((r) => r.model)])];
+  const color = {};
+  order.forEach((m, i) => color[m] = css.getPropertyValue(i < SERIES.length ? SERIES[i] : OTHER).trim());
+  return { order, color };
+}
+
 function render() {
   const d = state.data, t = d.totals, nm = names();
   const days = d.period_days;
-  $("period-text").textContent = (days === 1 ? "last 24 hours" : `last ${days} days`) + (state.project ? " · " + nm.project(state.project) : "");
-  const kpi = (k, v, s, cls = "") => `<div class="kpi ${cls}"><div class="label">${k}</div><div class="value num">${v}</div><div class="sub">${s}</div></div>`;
-  $("kpis").innerHTML =
-    kpi("Tokens", fmt(t.tokens), `${fmt(t.output)} written by the models`) +
-    kpi("Estimated cost", money(t.cost), t.tokens_without_price ? `plus ${fmt(t.tokens_without_price)} tokens without a price` : "at API list prices") +
-    kpi("Sessions", fmt(t.sessions), `${fmt(t.prompts)} prompts · ${fmt(t.tool_calls)} tool calls`) +
-    kpi("Wasted steps", pct(t.waste_share), `${fmt(t.wasted_tool_calls)} tool calls${t.waste_cost ? ` · about ${money(t.waste_cost)}` : ""}`, "waste");
-
+  const when = days === 1 ? "Last 24 hours" : `Last ${days} days`;
+  const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  $("scope").textContent = [when, state.project ? nm.project(state.project) : "All projects", shotMode ? date : ""].filter(Boolean).join(" · ");
+  $("headline").textContent = money(t.cost);
+  $("subline").textContent = `${fmt(t.tokens)} tokens at API list prices` + (t.tokens_without_price ? `, plus ${fmt(t.tokens_without_price)} without a price` : "");
+  const stat = (v, k, cls = "") => `<div class="stat ${cls}"><b class="num">${v}</b><span>${k}</span></div>`;
+  $("stats").innerHTML = stat(fmt(t.sessions), "sessions") + stat(fmt(t.model_calls), "model calls") +
+    stat(pct(t.waste_share), t.waste_cost ? `wasted · ${money(t.waste_cost)}` : "steps wasted", "warn");
   const list = state.projectList.includes(state.project) || !state.project ? state.projectList : [state.project, ...state.projectList];
   $("project").innerHTML = `<option value="">All projects</option>` + list.map((p) => `<option value="${esc(p)}">${esc(nm.project(p))}</option>`).join("");
   $("project").value = state.project;
-  renderChart(); renderModels(); renderFindings(); renderWhere();
+  renderModels(); renderChart(); renderFindings(); renderWhere();
 }
 
-function modelColors() {
-  const totals = {};
-  for (const r of state.data.days) totals[r.model] = (totals[r.model] || 0) + r.tokens;
-  const order = Object.keys(totals).sort((a, b) => totals[b] - totals[a]);
-  const colors = {};
-  order.forEach((m, i) => colors[m] = i < PALETTE.length - 1 ? PALETTE[i] : "#9ca3af");
-  return { order, colors };
+function renderModels() {
+  const ms = state.data.models, { color } = colors();
+  const total = ms.reduce((a, m) => a + m.tokens, 0) || 1;
+  $("strip").innerHTML = ms.filter((m) => m.tokens / total >= .004)
+    .map((m) => `<i style="flex:${m.tokens};background:${color[m.model]}" title="${esc(m.model)}"></i>`).join("");
+  if (!ms.length) { $("models").innerHTML = `<div class="empty">No model calls in this period.</div>`; return; }
+  fill($("models"), ms.map((m) => `<div class="item" title="${esc(m.model)} · ${m.source} · ${fmt(m.requests)} calls">
+    <span class="dot" style="background:${color[m.model]}"></span><span class="name">${esc(m.model)}</span>
+    <span class="v num"><b>${fmt(m.tokens)}</b> · ${m.priced === false ? "no price" : money(m.cost)}</span></div>`),
+    (n) => `and ${n} more model${n > 1 ? "s" : ""}`);
 }
 
 function renderChart() {
   const rows = state.data.days, m = state.metric, box = $("chart");
-  $("chart-title").textContent = `${m === "cost" ? "Cost" : "Tokens"} per day, by model`;
-  if (!rows.length) { box.innerHTML = `<div class="empty">No sessions in this period.</div>`; $("legend").innerHTML = ""; return; }
-  const { order, colors } = modelColors();
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const iso = (d) => d.toISOString().slice(0, 10);
-  const last = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00Z");
-  const n = Math.max(state.data.period_days, 7);  // "Today" still shows the week around it
+  $("chart-title").textContent = (m === "cost" ? "Cost per " : "Tokens per ") + (state.data.step === "hour" ? "hour" : "day");
+  const { order, color } = colors();
+  // A day is shown hour by hour (keys in UTC, labels in local time); longer periods by day.
+  const hourly = state.data.step === "hour", len = hourly ? 13 : 10, unit = hourly ? 3600000 : 86400000;
+  const now = new Date(), last = new Date(now.toISOString().slice(0, len) + (hourly ? ":00:00Z" : "T00:00:00Z"));
+  const n = hourly ? 24 : state.data.period_days;
   const buckets = [];
-  for (let i = n - 1; i >= 0; i--) buckets.push(iso(new Date(last.getTime() - i * 86400000)));
+  for (let i = n - 1; i >= 0; i--) buckets.push(new Date(last.getTime() - i * unit).toISOString().slice(0, len));
   const val = (r) => (m === "cost" ? r.cost || 0 : r.tokens);
   const stack = {}; buckets.forEach((k) => stack[k] = {});
   rows.forEach((r) => { if (stack[r.day]) stack[r.day][r.model] = (stack[r.day][r.model] || 0) + val(r); });
-  // The axis goes up in round steps: 1, 2, 2.5 or 5 times a power of ten.
-  const top = Math.max(...buckets.map((k) => Object.values(stack[k]).reduce((a, b) => a + b, 0)), 1e-9);
-  const p10 = 10 ** Math.floor(Math.log10(top / 4));
-  const stepSize = [1, 2, 2.5, 5, 10].map((f) => f * p10).find((x) => x * 4 >= top);
-  const ticks = Math.ceil(top / stepSize), max = ticks * stepSize;
-  // Drawn at the box's own size in pixels, so text keeps its size and the bars fill the card.
-  const W = Math.max(box.clientWidth, 200), H = Math.max(box.clientHeight, 120);
-  const fs = parseFloat(getComputedStyle(document.body).fontSize);
-  const L = fs * 3.6, B = fs * 2.6, T = fs * .5;
-  const bw = (W - L) / buckets.length;
+  const sums = buckets.map((k) => Object.values(stack[k]).reduce((a, b) => a + b, 0));
+  // Round steps on the axis: 1, 2, 2.5 or 5 times a power of ten, three or four of them.
+  const top = Math.max(...sums, 1e-9);
+  const p10 = 10 ** Math.floor(Math.log10(top / 3));
+  const step = [1, 2, 2.5, 5, 10].map((f) => f * p10).find((x) => x * 4 >= top);
+  const ticks = Math.ceil(top / step), max = ticks * step;
+  const W = box.clientWidth, H = box.clientHeight;
+  if (!W || !H) return;
   const show = (v) => (m === "cost" ? money(v) : fmt(v));
-  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Usage per day">`;
+  const L = 48, B = 24, T = 8;
+  const slot = (W - L) / buckets.length, bw = Math.min(slot * .64, 24);
+  let svg = `<svg width="${W}" height="${H}" role="img" aria-label="${m === "cost" ? "Cost" : "Tokens"} per day"><defs>`;
+  buckets.forEach((k, i) => {
+    if (!sums[i]) return;
+    const h = (H - B - T) * sums[i] / max, x = L + i * slot + (slot - bw) / 2;
+    svg += `<clipPath id="c${i}"><rect x="${x}" y="${H - B - h}" width="${bw}" height="${h + 4}" rx="${Math.min(4, bw / 3)}"/></clipPath>`;
+  });
+  svg += `</defs>`;
   for (let i = 0; i <= ticks; i++) {
     const y = T + (H - B - T) * (1 - i / ticks);
-    svg += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--line)" />`;
-    svg += `<text x="${L - fs * .4}" y="${y + fs * .3}" text-anchor="end">${show(stepSize * i)}</text>`;
+    svg += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--border)" ${i ? 'stroke-dasharray="2 4"' : ""}/>`;
+    svg += `<text x="${L - 12}" y="${y + 4}" text-anchor="end">${show(step * i)}</text>`;
   }
-  const every = Math.ceil(buckets.length / Math.max(1, Math.floor((W - L) / (fs * 2.4))));
+  const every = Math.ceil(buckets.length / Math.max(1, Math.floor((W - L) / 44)));
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   buckets.forEach((k, i) => {
-    const d = new Date(k + "T00:00:00Z"), x = L + i * bw + bw / 2;
-    if (i % every === 0) svg += `<text x="${x}" y="${H - B + fs * 1.15}" text-anchor="middle">${d.getUTCDate()}</text>`;
-    if (i === 0 || d.getUTCDate() === 1) {
-      svg += `<text x="${L + i * bw}" y="${H - B + fs * 2.3}" text-anchor="start" font-weight="600">${MONTHS[d.getUTCMonth()]}${i === 0 || d.getUTCMonth() === 0 ? " " + d.getUTCFullYear() : ""}</text>`;
-      if (i) svg += `<line x1="${L + i * bw}" x2="${L + i * bw}" y1="${T}" y2="${H - B + fs * .2}" stroke="var(--line-strong)" stroke-dasharray="2 3" />`;
-    }
+    const x = L + i * slot + slot / 2;
+    const label = hourly ? String(new Date(k + ":00:00Z").getHours()).padStart(2, "0") + ":00"
+      : (([y, mo, d]) => `${+d} ${MONTHS[mo - 1]}`)(k.split("-"));
+    if ((buckets.length - 1 - i) % every === 0) svg += `<text x="${x}" y="${H - 4}" text-anchor="middle">${label}</text>`;
     let y = H - B;
+    svg += `<g clip-path="url(#c${i})">`;
     for (const model of order) {
       const v = stack[k][model] || 0;
       if (!v) continue;
       const h = (H - B - T) * v / max;
       y -= h;
-      svg += `<rect x="${L + i * bw + bw * .14}" y="${y}" width="${Math.max(bw * .72, 1)}" height="${h}" fill="${colors[model]}" rx="${Math.min(3, bw / 6)}"><title>${k} · ${esc(model)}: ${show(v)}</title></rect>`;
+      svg += `<rect x="${L + i * slot + (slot - bw) / 2}" y="${y}" width="${bw}" height="${h}" fill="${color[model]}"><title>${k} · ${esc(model)}: ${show(v)}</title></rect>`;
     }
+    svg += `</g>`;
   });
   box.innerHTML = svg + "</svg>";
-  $("legend").innerHTML = order.map((mo) => `<span style="--c:${colors[mo]}">${esc(mo)}</span>`).join("");
-}
-
-const row = (name, value, share, meta, color) => `<div class="row"><div class="line"><span class="name">${name}</span><span class="v num">${value}</span></div>
-  <div class="bar"><i style="width:${Math.max(0, Math.min(100, share * 100))}%${color ? ";background:" + color : ""}"></i></div>${meta ? `<div class="meta">${meta}</div>` : ""}</div>`;
-
-function renderModels() {
-  const ms = state.data.models, nm = names();
-  if (!ms.length) { $("models").innerHTML = `<div class="empty">No model calls.</div>`; return; }
-  const { colors } = modelColors();
-  const max = Math.max(...ms.map((x) => x.tokens), 1);
-  let html = `<div class="rows">` + ms.slice(0, 8).map((x) => row(`${esc(x.model)} <small>${x.source}</small>`,
-    `<b>${fmt(x.tokens)}</b> · ${x.priced ? money(x.cost) : "no price"}`, x.tokens / max,
-    `${fmt(x.requests)} calls · ${fmt(x.cache_read)} from cache · ${fmt(x.output)} written`, colors[x.model])).join("") + `</div>`;
-  const machines = state.data.machines || [];
-  if (machines.length > 1) {
-    const mmax = Math.max(...machines.map((x) => x.tokens), 1);
-    html += `<h3>Machines</h3><div class="rows">` + machines.map((x) => row(esc(nm.machine(x.machine)),
-      `<b>${fmt(x.tokens)}</b> · ${money(x.cost)}`, x.tokens / mmax, "")).join("") + `</div>`;
-  }
-  $("models").innerHTML = html;
 }
 
 function renderFindings() {
   const fs = state.data.findings;
   if (!fs.length) { $("findings").innerHTML = `<div class="empty">Nothing wasteful found in this period.</div>`; return; }
-  const sources = { claude: "Claude Code", codex: "Codex" };
-  $("findings").innerHTML = fs.map((f) => {
-    const stats = f.kind === "big_outputs"
-      ? `<b>${fmt(f.calls)}</b> results · ${fmt(f.tokens)} tokens`
-      : `<b>${fmt(f.calls)}</b> calls (${pct(f.share_of_calls)})${f.cost ? ` · <b>${money(f.cost)}</b>` : ""}`;
-    const keys = Object.keys(f.fix), same = new Set(Object.values(f.fix)).size === 1;
-    const fixes = (same ? [keys[0]] : keys).map((s) => `<div class="fix"><b>Fix${same ? "" : " in " + (sources[s] || s)}.</b> ${md(f.fix[s])}</div>`).join("");
-    return `<div class="finding"><div class="top"><span class="title">${esc(f.title)}</span><span class="stats num">${stats}</span></div>${fixes}</div>`;
-  }).join("");
+  fill($("findings"), fs.map((f) => {
+    const value = f.cost ? money(f.cost) : `${fmt(f.tokens)} tokens`;
+    const full = Object.values(f.fix)[0];
+    return `<div class="finding" title="${esc(full)}"><div class="top"><span class="title">${esc(f.title)}</span>
+      <span class="cost num">${value}</span></div><div class="tip">${md(f.short || full)}</div></div>`;
+  }), null, $("findings-count"), (n) => `${n} found`);
 }
 
-// One project chosen: its most expensive sessions. Otherwise: projects, then sessions.
+// One project chosen: its most expensive sessions. Otherwise: projects.
 function renderWhere() {
   const d = state.data, nm = names();
-  const sessions = (list) => {
-    const max = Math.max(...list.map((s) => s.cost || 0), 1e-9);
-    return `<div class="rows">` + list.map((s, i) => row(state.private ? `Session ${i + 1}` : esc(s.title || s.id),
-      `<b>${money(s.cost)}</b>`, (s.cost || 0) / max,
-      [state.project ? "" : esc(nm.project(s.project)), s.source + (s.parent ? " subagent" : ""),
-       s.machine ? esc(nm.machine(s.machine)) : "", `${fmt(s.calls)} tool calls`, ago(s.last_ts)].filter(Boolean).join(" · "))).join("") + `</div>`;
-  };
+  const place = (name, value, share) => `<div class="place"><div class="item"><span class="name">${name}</span>
+    <span class="v num"><b>${value}</b></span></div><div class="bar"><i style="width:${Math.max(1, Math.min(100, share * 100))}%"></i></div></div>`;
   if (state.project) {
     $("where-title").textContent = "Most expensive sessions";
-    $("where").innerHTML = d.top_sessions.length ? sessions(d.top_sessions.slice(0, 10)) : `<div class="empty">No sessions.</div>`;
+    const ss = d.top_sessions, max = Math.max(...ss.map((s) => s.cost || 0), 1e-9);
+    if (!ss.length) { $("where").innerHTML = `<div class="empty">No sessions.</div>`; return; }
+    fill($("where"), ss.map((s, i) => place(state.private ? `Session ${i + 1}` : esc(s.title || s.id), money(s.cost), (s.cost || 0) / max)),
+      null, $("where-count"), () => "");
     return;
   }
   $("where-title").textContent = "Projects";
   if (!d.projects.length) { $("where").innerHTML = `<div class="empty">No projects.</div>`; return; }
   const max = Math.max(...d.projects.map((p) => p.cost || 0), 1e-9);
-  $("where").innerHTML = `<div class="rows">` + d.projects.slice(0, 6).map((p) => row(esc(nm.project(p.project)),
-    `<b>${money(p.cost)}</b> · ${fmt(p.tokens)}`, (p.cost || 0) / max, `${p.sessions} sessions · ${esc(p.sources)}`)).join("") + `</div>` +
-    `<h3>Most expensive sessions</h3>` + sessions(d.top_sessions.slice(0, 5));
+  fill($("where"), d.projects.map((p) => place(esc(nm.project(p.project)), money(p.cost), (p.cost || 0) / max)),
+    null, $("where-count"), (n) => `${d.totals.projects || n} in all`);
 }
 
-function setPeriodButtons() {
+function setControls() {
   document.querySelectorAll("#period button").forEach((x) => x.classList.toggle("on", +x.dataset.days === state.days));
   document.querySelectorAll("#metric button").forEach((x) => x.classList.toggle("on", x.dataset.m === state.metric));
-  $("private").checked = state.private;
+  $("private").setAttribute("aria-pressed", state.private);
 }
-document.querySelectorAll("#period button").forEach((b) => b.onclick = () => { state.days = +b.dataset.days; setPeriodButtons(); load(); });
-document.querySelectorAll("#metric button").forEach((b) => b.onclick = () => { state.metric = b.dataset.m; setPeriodButtons(); renderChart(); });
+document.querySelectorAll("#period button").forEach((b) => b.onclick = () => { state.days = +b.dataset.days; setControls(); load(); });
+document.querySelectorAll("#metric button").forEach((b) => b.onclick = () => { state.metric = b.dataset.m; setControls(); renderChart(); });
 $("project").onchange = (e) => { state.project = e.target.value; load(); };
-$("private").onchange = (e) => {
-  state.private = e.target.checked;
-  try { localStorage.setItem("kuakgan.private", state.private ? "1" : "0"); } catch {}
+$("private").onclick = () => {
+  state.private = !state.private;
+  store("kuakgan.private", state.private ? "1" : "0");
+  setControls();
   if (state.data) render();
 };
 
 $("shot").onclick = () => {
   const btn = $("shot"), text = $("shot-text"), done = (msg) => { text.textContent = msg; setTimeout(() => { text.textContent = "Screenshot"; btn.disabled = false; }, 3500); };
   btn.disabled = true; text.textContent = "Taking picture…";
-  const q = new URLSearchParams({ w: innerWidth, h: innerHeight, days: state.days, metric: state.metric, private: state.private ? "1" : "0" });
+  const q = new URLSearchParams({ w: 1200, h: 630, days: state.days, metric: state.metric, private: state.private ? "1" : "0", theme: theme() });
   if (state.project) q.set("project", state.project);
   const png = fetch("/screenshot.png?" + q, { headers: { "X-Kuakgan": "shot" }, cache: "no-store" })
     .then((r) => r.ok ? r.blob() : Promise.reject(new Error(r.status === 501 ? "Needs Edge or Chrome" : `HTTP ${r.status}`)));
@@ -390,7 +416,7 @@ $("shot").onclick = () => {
   // Only if copying is refused is the picture saved to Downloads instead.
   let copied;
   try { copied = navigator.clipboard.write([new ClipboardItem({ "image/png": png })]); } catch (e) { copied = Promise.reject(e); }
-  copied.then(() => done("Copied, ready to paste"), () => png.then((blob) => {
+  copied.then(() => done("Copied"), () => png.then((blob) => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = `kuakgan-${new Date().toISOString().slice(0, 10)}.png`; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
@@ -399,8 +425,11 @@ $("shot").onclick = () => {
 };
 
 let resizeTimer;
-addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => state.data && renderChart(), 80); });
-setPeriodButtons();
+// Watches the page itself, which also catches size changes that send no resize event.
+new ResizeObserver(() => { fit(); clearTimeout(resizeTimer); resizeTimer = setTimeout(() => state.data && render(), 80); })
+  .observe(document.documentElement);
+fit();
+setControls();
 load();
 if (!shotMode) setInterval(() => { if (!document.hidden) load(); }, 120000);
 </script>

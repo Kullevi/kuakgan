@@ -51,9 +51,12 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    ten minutes, except by `index`.
 9. **The dashboard is one page.** `kuakgan.py dashboard` serves
    `dashboard.html` and `/data.json` on 127.0.0.1, refusing requests for any
-   other host name (DNS rebinding). Its cards fill one window, with text that
-   grows with it, so a screenshot shows everything; the Screenshot button has
-   Edge or Chrome draw the same page without a window. Private mode numbers
+   other host name (DNS rebinding). It is designed as one 1200×630
+   frame (a link preview's size) and scaled to the window; each list shows as
+   many whole rows as fit and counts the rest, so nothing is cut off. A narrow
+   window stacks the cards instead. The Screenshot button has Edge or Chrome
+   draw that frame without a window, in the current light or dark theme. One
+   type scale, spacing grid and palette set the look. Private mode numbers
    projects, sessions and machines instead of naming them. Charts are inline SVG;
    no outside scripts or fonts, so it works offline. A background
    thread reads new logs every minute and prepares the usual periods, so that

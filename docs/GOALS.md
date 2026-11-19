@@ -32,8 +32,8 @@ create accounts.
    SessionStart hook). From then on agents run `kuakgan check` at the start of
    a task and get the earlier mistakes in that project with what worked
    instead.
-4. **Something to share.** The dashboard fits in one window, so a screenshot
-   shows all of it; a private mode hides project, session and machine names.
+4. **Something to share.** The dashboard is one 1200×630 view, the size of a
+   link preview, so a screenshot shows all of it and looks finished; a private mode hides project, session and machine names.
 
 ## What Kuakgan does
 
