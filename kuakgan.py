@@ -1628,7 +1628,8 @@ def start_in_background(port: int, open_browser: bool) -> int:
                      close_fds=True, **options)
     for _ in range(120):
         if dashboard_answers(url):
-            print(f"Kuakgan dashboard on {url}; stop it with `kuakgan dashboard --stop`.")
+            print(f"Kuakgan dashboard on {url}; stop it with `kuakgan dashboard --stop"
+                  + (f" --port {port}" if port != 8766 else "") + "`.")
             if open_browser:
                 open_window(url)
             return 0

@@ -78,7 +78,8 @@ for it and install it for the user if it is missing; the user should not have
 to do anything but say yes. Try `python3 --version`,
 then `python --version` and `py -3 --version`. On Windows, `python3` and
 sometimes `python` are a Microsoft Store placeholder that prints a message
-instead of a version; use whichever command prints a real version.
+instead of a version; use whichever command prints a real version, the
+newest if several do.
 
 - Missing on Windows: tell the user this installs Python and accepts the
   winget/Microsoft terms, and with their OK run
@@ -177,7 +178,8 @@ prints the address instead: give it to the user. Tell the user that:
 - "Screenshot" copies a picture of the window, ready to paste into a post;
 - they can ask you to "open the Kuakgan dashboard" again later.
 
-To stop it: `kuakgan dashboard --stop`.
+To stop it: `kuakgan dashboard --stop` (with the same `--port` if it was
+started with one).
 
 #### A shortcut and opening at login (ask the user)
 
@@ -380,7 +382,7 @@ screenshots show no project, session or machine names, commands or file names.
   elsewhere, set `CLAUDE_CONFIG_DIR` or `CODEX_HOME` as they do.
 - **Numbers look off after an update.** Run `kuakgan index --rebuild`.
 - **The dashboard does not open.** Another program may use port 8766; start it
-  with `--port 8780`.
+  with `--port 8780`, and give the same `--port` to `--stop`.
 - **Screenshot does nothing.** It needs Edge or Chrome; without them, take a
   screenshot of the window the usual way.
 - **The tips do not appear in new sessions.** Run the hook's command yourself;
