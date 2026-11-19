@@ -321,3 +321,36 @@ class ClassifyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProjectTest(unittest.TestCase):
+    """Worktrees and subfolders count as their repository, also once deleted."""
+
+    def test_worktrees_and_subfolders_count_as_their_repository(self):
+        root = Path(tempfile.mkdtemp(prefix="kuakgan-repo-"))
+        (root / "shop" / ".git" / "worktrees" / "fix-cart").mkdir(parents=True)
+        (root / "shop" / "web").mkdir()
+        lane = root / "work" / "fix-cart"
+        lane.mkdir(parents=True)
+        (lane / ".git").write_text(f"gitdir: {root / 'shop' / '.git' / 'worktrees' / 'fix-cart'}\n")
+        self.assertEqual(kuakgan.repo_of(str(root / "shop" / "web")), "shop")
+        self.assertEqual(kuakgan.repo_of(str(lane)), "shop")
+        self.assertIsNone(kuakgan.repo_of(str(root / "work" / "deleted")))
+
+    def test_a_deleted_worktree_joins_the_repository_of_its_neighbours(self):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.executescript(kuakgan.SCHEMA)
+        rows = [("a", "/w/fix-cart", "shop", 1), ("a2", "/w/fix-tax", "shop", 1), ("a3", "/w/fix-ui", "shop", 1),
+                ("a4", "/w/fix-api", "shop", 1), ("a5", "/w/tool-x", "tools", 1), ("b", "/w/old-lane", "old-lane", 0),
+                ("e", "/v/one", "shop", 1), ("e2", "/v/two", "tools", 1), ("f", "/v/gone", "gone", 0),
+                ("c", "/home/me/shop", "shop", 1), ("d", "/home/me/notes", "notes", 0)]
+        for sid, cwd, project, known in rows:
+            db.execute("INSERT INTO sessions (id, cwd, project, machine, known) VALUES (?, ?, ?, '', ?)",
+                       (sid, cwd, project, known))
+        kuakgan.infer_projects(db)
+        got = dict(db.execute("SELECT id, project FROM sessions").fetchall())
+        self.assertEqual(got["b"], "shop")    # four in five worktrees beside it are shop's
+        self.assertEqual(got["f"], "gone")    # its neighbours are split: no guess
+        self.assertEqual(got["d"], "notes")   # beside shop's own folder: says nothing

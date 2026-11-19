@@ -371,7 +371,8 @@ which version in the pull request.
 
 Kuakgan only reads files on your computer, and on the other computers you add
 over SSH, and writes its index (`.kuakgan.db`) next to `kuakgan.py`. The list
-of other computers is in `kuakgan.json` next to it. The dashboard listens on `127.0.0.1` only. The index
+of other computers is in `kuakgan.json` next to it. To tell which repository a session belongs to, it reads the `.git` entry of
+each working folder. The dashboard listens on `127.0.0.1` only. The index
 keeps the first 400 characters of each command and the line of an error, so
 that it can show you what failed; it keeps no file contents, and of the
 conversation only each session's title or the start of its first prompt. Delete `.kuakgan.db`

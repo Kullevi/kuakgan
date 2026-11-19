@@ -15,6 +15,7 @@ import argparse
 import concurrent.futures
 import contextlib
 import difflib
+import functools
 import hashlib
 import json
 import multiprocessing
@@ -38,7 +39,7 @@ HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd(
 DB_PATH = Path(os.environ.get("KUAKGAN_DB", HERE / ".kuakgan.db"))
 MACHINES_PATH = Path(os.environ.get("KUAKGAN_MACHINES", HERE / "kuakgan.json"))
 PULL_EVERY = 600  # seconds between fetching from other machines, except for `index`
-INDEX_VERSION = 9  # bump when parsing changes; the index is then rebuilt
+INDEX_VERSION = 10  # bump when parsing changes; the index is then rebuilt
 
 
 def claude_root() -> Path:
@@ -528,6 +529,7 @@ def parse_file(job: tuple[str, str, dict]) -> tuple[str, list[dict] | str]:
     try:
         sessions = (parse_claude if source == "claude" else parse_codex)(path, prices)
         for s in sessions:
+            s["repo"] = repo_of(s["cwd"])  # read here, on the machine whose folders these are
             s["findings"] = session_findings(s)
             s["usage"] = dict(s["usage"])
         return path, sessions
@@ -651,7 +653,7 @@ CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, file TEXT, source TEXT
   cwd TEXT, project TEXT, title TEXT, client TEXT, first_ts REAL, last_ts REAL, user_msgs INTEGER,
   compactions INTEGER, calls INTEGER, errors INTEGER, input INTEGER, cache_read INTEGER,
   cache_write INTEGER, output INTEGER, requests INTEGER, cost REAL, unpriced INTEGER,
-  last_context INTEGER, models TEXT, machine TEXT);
+  last_context INTEGER, models TEXT, machine TEXT, known INTEGER);
 CREATE TABLE IF NOT EXISTS usage (session TEXT, hour TEXT, model TEXT, input INTEGER,
   cache_read INTEGER, cache_write INTEGER, output INTEGER, requests INTEGER, cost REAL);
 CREATE TABLE IF NOT EXISTS calls (session TEXT, seq INTEGER, ts REAL, tool TEXT, kind TEXT,
@@ -747,9 +749,37 @@ def log_files() -> dict[str, tuple[str, int, float]]:
     return found
 
 
+@functools.lru_cache(maxsize=4096)
+def repo_of(cwd: str) -> str | None:
+    """The name of the Git repository a working directory belongs to, read from the
+    folder itself, so every worktree and subfolder counts as its repository. None
+    when the folder is gone or not in a repository."""
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    path = os.path.abspath(cwd)
+    while True:
+        git = os.path.join(path, ".git")
+        if os.path.isdir(git):
+            return os.path.basename(path)
+        if os.path.isfile(git):  # a worktree: "gitdir: <repository>/.git/worktrees/<name>"
+            try:
+                line = Path(git).read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                return None
+            target = norm_path(os.path.join(path, line[7:].strip())) if line.startswith("gitdir:") else ""
+            m = re.match(r"(.*?)/(?:\.git/)?worktrees/[^/]+/?$", target)
+            if m:
+                return m.group(1).rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or None
+            return os.path.basename(path)
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
 def project_of(cwd: str) -> str:
-    """A short project name from a working directory; worktrees under a
-    `.claude/worktrees` or `-lanes` folder count as their repository."""
+    """A short project name from a working directory when its repository is unknown;
+    worktrees under a `.claude/worktrees` folder count as their repository."""
     path = norm_path(cwd)
     m = re.search(r"/([^/]+)/\.(?:claude|codex)/worktrees/", path)
     if m:
@@ -779,12 +809,12 @@ def store(db: sqlite3.Connection, path: str, source: str, size: int, mtime: floa
         db.execute("DELETE FROM sessions WHERE id=?", (s["id"],))
         for table in ("usage", "calls", "findings"):
             db.execute(f"DELETE FROM {table} WHERE session=?", (s["id"],))
-        db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-            s["id"], path, s["source"], s["parent"], s["cwd"], project_of(s["cwd"]),
+        db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            s["id"], path, s["source"], s["parent"], s["cwd"], s.get("repo") or project_of(s["cwd"]),
             s["title"] or s["first_prompt"], s["client"], s["first_ts"], s["last_ts"], s["user_msgs"],
             s["compactions"], len(s["calls"]), sum(c["err"] for c in s["calls"]), tot[0], tot[1],
             tot[2], tot[3], tot[4], tot[5], s["unpriced"], s["last_context"],
-            json.dumps(dict(models.most_common())), machine))
+            json.dumps(dict(models.most_common())), machine, 1 if s.get("repo") else 0))
         db.executemany("INSERT INTO usage VALUES (?,?,?,?,?,?,?,?,?)",
                        [(s["id"], h, m, *v) for (h, m), v in usage.items()])
         db.executemany("INSERT INTO calls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
@@ -851,8 +881,32 @@ def update_index(quiet: bool = False, only: list[str] | None = None, pull: bool 
             result = answer["machines"][m["name"]] = pull_machine(db, m, quiet)
             db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (f"error:{m['name']}", result.get("error", "")))
             db.commit()
+    infer_projects(db)
     db.close()
     return answer
+
+
+def infer_projects(db: sqlite3.Connection) -> None:
+    """A worktree that was deleted before Kuakgan read it has no repository on record.
+    When at least four in five of the worktrees beside it on the same machine belong
+    to one repository, it is taken to belong there too; otherwise it keeps its folder
+    name. Only folders whose name differs from their repository's count, so a
+    repository's own folder says nothing about its neighbours."""
+    parent = lambda cwd: norm_path(cwd).rsplit("/", 1)[0]
+    known = defaultdict(Counter)  # worktree folders per repository, per parent folder
+    for r in db.execute("SELECT DISTINCT machine, cwd, project FROM sessions WHERE known = 1"):
+        if norm_path(r["cwd"]).rsplit("/", 1)[-1] != r["project"]:
+            known[(r["machine"], parent(r["cwd"]))][r["project"]] += 1
+    changes = []
+    for r in db.execute("SELECT id, machine, cwd, project FROM sessions WHERE known = 0 AND cwd != ''"):
+        repos = known.get((r["machine"], parent(r["cwd"])))
+        if repos:
+            repo, n = repos.most_common(1)[0]
+            if n >= 0.8 * sum(repos.values()) and r["project"] != repo:
+                changes.append((repo, r["id"]))
+    if changes:
+        db.executemany("UPDATE sessions SET project = ? WHERE id = ?", changes)
+        db.commit()
 
 
 # ---------- other machines ----------
@@ -1328,7 +1382,7 @@ def find_project_sessions(db, directory: str) -> tuple[str, list]:
     if not exact:
         exact = [r for r in rows if cwd.lower().startswith(norm_path(r["cwd"]).lower() + "/")
                  or norm_path(r["cwd"]).lower().startswith(cwd.lower() + "/")]
-    project = exact[0]["project"] if exact else project_of(cwd)
+    project = exact[0]["project"] if exact else repo_of(cwd) or project_of(cwd)
     return project, [r["id"] for r in rows if r["project"] == project]
 
 

@@ -43,13 +43,18 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    context, so it returns a handful of tips and lists, not raw data. Its
    "current session" is the session in that project that was written to most
    recently, within the last half hour.
-8. **Other machines are read where they are.** `machines add` remembers a
+8. **A project is a repository.** A session belongs to the Git repository of its
+   working folder, read from the folder's `.git` where the logs are, so worktrees
+   and subfolders count as their repository. A worktree deleted before Kuakgan
+   read it joins the repository that at least four in five of the worktrees beside
+   it belong to; otherwise it keeps its folder name.
+9. **Other machines are read where they are.** `machines add` remembers a
    computer reachable over SSH without a password. Kuakgan then sends its own
    source over SSH to that computer's Python, which lists its logs and reads only
    the new or changed ones; only the results come back. Nothing is installed
    there, and the logs never leave it. Other machines are fetched at most every
    ten minutes, except by `index`.
-9. **The dashboard is one page.** `kuakgan.py dashboard` serves
+10. **The dashboard is one page.** `kuakgan.py dashboard` serves
    `dashboard.html` and `/data.json` on 127.0.0.1, refusing requests for any
    other host name (DNS rebinding). It is designed as one 1200×630
    frame (a link preview's size) and scaled to the window; each list shows as
@@ -61,7 +66,7 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    no outside scripts or fonts, so it works offline. A background
    thread reads new logs every minute and prepares the usual periods, so that
    switching between them answers at once.
-10. **Installation is a clone.** One Python file using only the standard
+11. **Installation is a clone.** One Python file using only the standard
    library, plus the page and the logo. No packaging.
 
 ## Testing
