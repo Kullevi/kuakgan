@@ -828,8 +828,11 @@ def run_remote(m: dict, request: dict, python: str, timeout: float | None):
     proc = subprocess.Popen(ssh_command(m, f"{python} -c '{REMOTE_BOOT}'"), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE if request["action"] == "list" else subprocess.DEVNULL)
-    proc.stdin.write(payload.encode())
-    proc.stdin.close()
+    def send():
+        with contextlib.suppress(OSError):
+            proc.stdin.write(payload.encode())
+            proc.stdin.close()
+    threading.Thread(target=send, daemon=True).start()
     return proc
 
 
@@ -871,7 +874,10 @@ def pull_machine(db: sqlite3.Connection, m: dict, quiet: bool = False) -> dict:
         return {"online": False, "error": "no SSH connection, or no Python 3.9+ there"}
     proc = run_remote(m, {"action": "list"}, python, 60)
     try:
-        listing, err = proc.communicate(timeout=120)
+        listing, err = proc.stdout.read(), proc.stderr.read()  # SSH's keep-alive ends a hung read
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.wait(timeout=30)
         listing = json.loads(listing.decode() or "null")
     except (subprocess.TimeoutExpired, ValueError):
         proc.kill()
