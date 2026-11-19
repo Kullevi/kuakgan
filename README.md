@@ -52,7 +52,7 @@ taken out of our own setup and made general.
 
 Costs are estimates at API list prices. If you use a subscription you pay a flat
 fee instead; the estimate shows what the same work would cost through the API.
-Models without a known price (such as most OpenAI models) count tokens only.
+Models without a known price count tokens only, and the totals say how many.
 
 ## About Kullevi, the team behind Kuakgan
 
@@ -110,6 +110,13 @@ Kuakgan finds the logs in `~/.claude/projects`, `~/.codex/sessions` and
 `~/.codex/archived_sessions` (or under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
 when those are set). If a folder is missing, that tool has simply not been
 used on this computer.
+
+**Keep the history (after asking the user).** Claude Code deletes conversations
+older than 30 days by default. Kuakgan keeps every session it has read, even
+after its log is gone, but anything deleted before Kuakgan saw it is lost; this
+is why older months often look empty at first. Suggest keeping them: with the
+user's OK, set `"cleanupPeriodDays": 3650` in `~/.claude/settings.json` (merge
+it with what is there). Codex keeps its sessions until they are deleted by hand.
 
 ### 3. Other computers (Agent, after asking the user)
 
@@ -245,15 +252,17 @@ tool call is a full model turn over the whole context.
 
 ### Prices
 
-Kuakgan knows Anthropic's list prices. To add or change a price, put a
+Kuakgan knows Anthropic's and OpenAI's list prices (standard tier). To add or change a price, put a
 `prices.json` next to `kuakgan.py`, in dollars per million tokens:
 
 ```json
 { "gpt-6.2-sol": { "input": 2.5, "output": 15, "cache_read": 0.25 } }
 ```
 
-`cache_write` defaults to 1.25 times the input price. A model matches the
-longest name in the table that it starts with.
+`cache_write` defaults to 1.25 times the input price. A model gets the price of
+the longest name in the table that it is or starts with as a whole part
+(`gpt-5` prices `gpt-5-mini-2025-08-07` but not `gpt-5.7`). When prices change,
+all costs are worked out again from the counted tokens.
 
 ## Add another tool
 
@@ -279,8 +288,8 @@ over SSH, and writes its index (`.kuakgan.db`) next to `kuakgan.py`. The list
 of other computers is in `kuakgan.json` next to it. The dashboard listens on `127.0.0.1` only. The index
 keeps the first 400 characters of each command and the line of an error, so
 that it can show you what failed; it keeps no file contents, and of the
-conversation only each session's title or the start of its first prompt. Delete `.kuakgan.db` to remove
-it; it is rebuilt from the logs when needed. The share card shows totals and
+conversation only each session's title or the start of its first prompt. Sessions stay in the index after their logs are deleted. Delete `.kuakgan.db`
+to remove them; it is rebuilt from the logs that are still there. The share card shows totals and
 model names only.
 
 ## Troubleshooting

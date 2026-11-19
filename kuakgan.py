@@ -57,8 +57,8 @@ ABOUT = ("Kuakgan is open source, built by the team behind Kullevi "
 # ---------- prices ----------
 
 # Dollars per million tokens: input, output, cache write (5 minutes), cache write
-# (1 hour), cache read. Anthropic's list prices; the first matching prefix wins, so
-# longer prefixes come first. Models without a price count tokens but no cost.
+# (1 hour), cache read, at Anthropic's and OpenAI's list prices; the longest matching
+# prefix wins. Models without a price count tokens but no cost.
 # Add or override prices in prices.json next to this file (see README).
 PRICES = {
     "claude-fable-5-2": (8, 40, 10, 16, 0.20), "claude-mythos-5-2": (8, 40, 10, 16, 0.20),
@@ -71,13 +71,27 @@ PRICES = {
     "claude-sonnet-4": (3, 15, 3.75, 6, 0.3), "claude-3-7-sonnet": (3, 15, 3.75, 6, 0.3),
     "claude-haiku-5-5": (0.10, 0.50, 0.125, 0.2, 0.01), "claude-haiku-4-5": (1, 5, 1.25, 2, 0.1),
     "claude-3-5-haiku": (0.8, 4, 1, 1.6, 0.08),
+    # OpenAI, from developers.openai.com/api/docs/pricing (standard tier, up to 272K input
+    # tokens). OpenAI has no separate cache-write price, so writes count as input.
+    "gpt-6.2-astra": (8, 40, 8, 8, 0.40), "gpt-6-astra": (10, 50, 10, 10, 1.0),
+    "gpt-6.2-sol": (2, 10, 2, 2, 0.10), "gpt-6.1-sol": (2, 10, 2, 2, 0.10),
+    "gpt-6-sol": (2, 10, 2, 2, 0.20), "gpt-6.1-terra": (1, 5, 1, 1, 0.05),
+    "gpt-6-luna": (0.10, 0.50, 0.10, 0.10, 0.01),
+    "gpt-5.6-sol": (4, 20, 4, 4, 0.40), "gpt-5.6-terra": (2, 12, 2, 2, 0.20),
+    "gpt-5.6-luna": (0.20, 1.20, 0.20, 0.20, 0.02),
+    "gpt-5.5": (5, 30, 5, 5, 0.50), "gpt-5.4-mini": (0.75, 4.5, 0.75, 0.75, 0.075),
+    "gpt-5.4-nano": (0.20, 1.25, 0.20, 0.20, 0.02), "gpt-5.4": (2.5, 15, 2.5, 2.5, 0.25),
+    "gpt-5.2": (1.75, 14, 1.75, 1.75, 0.175), "gpt-5.1": (1.25, 10, 1.25, 1.25, 0.125),
+    "gpt-5-mini": (0.25, 2, 0.25, 0.25, 0.025), "gpt-5-nano": (0.05, 0.40, 0.05, 0.05, 0.005),
+    "gpt-5.3-codex": (1.75, 14, 1.75, 1.75, 0.175), "gpt-5-codex": (1.25, 10, 1.25, 1.25, 0.125),
+    "gpt-5": (1.25, 10, 1.25, 1.25, 0.125),
 }
 
 
 def load_prices() -> dict:
     prices = dict(PRICES)
     with contextlib.suppress(OSError, ValueError, TypeError):
-        extra = json.loads((HERE / "prices.json").read_text(encoding="utf-8"))
+        extra = json.loads(Path(os.environ.get("KUAKGAN_PRICES", HERE / "prices.json")).read_text(encoding="utf-8"))
         for model, p in extra.items():
             if isinstance(p, dict):
                 inp = float(p["input"])
@@ -88,8 +102,13 @@ def load_prices() -> dict:
 
 
 def price_for(model: str, prices: dict):
-    model = (model or "").lower()
-    return next((p for prefix, p in prices.items() if model.startswith(prefix)), None)
+    """The price of the longest name in the table that `model` is or starts with, as a
+    whole part: gpt-5 prices gpt-5-mini-2025 but not gpt-5.7. A provider prefix such as
+    `anthropic/` and dots in Claude versions (claude-opus-5.5) are ignored."""
+    model = (model or "").lower().rsplit("/", 1)[-1]
+    if model.startswith("claude-"):
+        model = model.replace(".", "-")
+    return next((p for name, p in prices.items() if model == name or model.startswith(name + "-")), None)
 
 
 def cost_of(model: str, u: dict, prices: dict):
@@ -646,6 +665,7 @@ CREATE INDEX IF NOT EXISTS findings_s ON findings(session);
 CREATE INDEX IF NOT EXISTS sessions_file ON sessions(file);
 CREATE INDEX IF NOT EXISTS sessions_last ON sessions(last_ts);
 CREATE INDEX IF NOT EXISTS files_path ON files(path);
+CREATE INDEX IF NOT EXISTS calls_err ON calls(err);
 """
 
 
@@ -663,7 +683,50 @@ def connect() -> sqlite3.Connection:
         db.executescript(SCHEMA)
         db.execute("INSERT INTO meta VALUES ('version', ?)", (str(INDEX_VERSION),))
         db.commit()
+    prices = load_prices()
+    wanted = hashlib.sha1(json.dumps(prices).encode()).hexdigest()[:12]
+    have = db.execute("SELECT value FROM meta WHERE key = 'prices'").fetchone()
+    if not have or have[0] != wanted:
+        reprice(db, prices)
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('prices', ?)", (wanted,))
+        db.commit()
     return db
+
+
+def reprice(db: sqlite3.Connection, prices: dict) -> None:
+    """Works out every cost again from the stored token counts after prices change,
+    without reading the logs again (some may be gone). Cache writes count at the
+    five-minute price, since the index keeps one total for them."""
+    for model, in db.execute("SELECT DISTINCT model FROM usage").fetchall():
+        p = price_for(model, prices)
+        if p is None:
+            db.execute("UPDATE usage SET cost = 0 WHERE model = ?", (model,))
+        else:
+            db.execute("UPDATE usage SET cost = (input * ? + output * ? + cache_write * ? + cache_read * ?) / 1e6 "
+                       "WHERE model = ?", (p[0], p[1], p[2], p[4], model))
+    old = {r[0]: r[1] or 0 for r in db.execute("SELECT id, cost FROM sessions")}
+    db.execute("UPDATE sessions SET cost = (SELECT COALESCE(SUM(cost), 0) FROM usage WHERE session = sessions.id)")
+    unpriced = defaultdict(int)
+    for session, model, tokens in db.execute(
+            "SELECT session, model, SUM(input + cache_read + cache_write + output) FROM usage GROUP BY session, model"):
+        if price_for(model, prices) is None:
+            unpriced[session] += tokens
+    db.execute("UPDATE sessions SET unpriced = 0")
+    db.executemany("UPDATE sessions SET unpriced = ? WHERE id = ?", [(n, sid) for sid, n in unpriced.items()])
+    # A step's cost is its share of its session's cost, so it changes with the session's.
+    for sid, new in db.execute("SELECT id, cost FROM sessions").fetchall():
+        before = old.get(sid, 0)
+        if before > 0:
+            ratio = (new or 0) / before
+            db.execute("UPDATE calls SET turn_cost = turn_cost * ? WHERE session = ?", (ratio, sid))
+            db.execute("UPDATE findings SET cost = cost * ? WHERE session = ? AND cost IS NOT NULL", (ratio, sid))
+        elif new:
+            # Before, nothing had a price: spread the cost over the steps by their tokens.
+            total = db.execute("SELECT SUM(turn_tok) FROM calls WHERE session = ?", (sid,)).fetchone()[0] or 0
+            if total:
+                db.execute("UPDATE calls SET turn_cost = ? * turn_tok / ? WHERE session = ?", (new, total, sid))
+                db.execute("UPDATE findings SET cost = ? * tokens / ? WHERE session = ? AND cost IS NOT NULL",
+                           (new, total, sid))
 
 
 def log_files() -> dict[str, tuple[str, int, float]]:
@@ -743,10 +806,10 @@ def update_index(quiet: bool = False, only: list[str] | None = None, pull: bool 
              if MACHINE_SEP not in r["path"]}
     todo = [(p, src, size, mtime) for p, (src, size, mtime) in files.items()
             if known.get(p) != (size, mtime) and (only is None or p in only)]
-    gone = [p for p in known if p not in files]
+    # A deleted log keeps its sessions here: often this index is the only history left.
+    gone = [p for p in known if p not in files and known[p][0] != -1]
     for p in gone:
-        store(db, p, "", 0, 0, [])
-        db.execute("DELETE FROM files WHERE path=?", (p,))
+        db.execute("UPDATE files SET size = -1 WHERE path=?", (p,))
     started = time.time()
     total_bytes = sum(t[2] for t in todo) or 1
     done_bytes = 0
@@ -889,9 +952,8 @@ def pull_machine(db: sqlite3.Connection, m: dict, quiet: bool = False) -> dict:
     known = {r["path"]: (r["size"], r["mtime"]) for r in
              db.execute("SELECT path, size, mtime FROM files WHERE substr(path, 1, ?) = ?", (len(prefix), prefix))}
     todo = {k: v for k, v in files.items() if known.get(k) != (v[1], v[2])}
-    for k in [k for k in known if k not in files]:
-        store(db, k, "", 0, 0, [], name)
-        db.execute("DELETE FROM files WHERE path=?", (k,))
+    for k in [k for k in known if k not in files and known[k][0] != -1]:
+        db.execute("UPDATE files SET size = -1 WHERE path=?", (k,))
     total = sum(v[1] for v in todo.values())
     if todo and not quiet and total > 200_000_000:
         print(f"Kuakgan: reading {len(todo)} log files ({total / 1e9:.1f} GB) on {name}; only the results "
@@ -1385,6 +1447,29 @@ def dashboard_answers(url: str) -> bool:
 def serve_dashboard(port: int, open_browser: bool) -> None:
     url = f"http://127.0.0.1:{port}/"
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    cache, lock = {}, threading.Lock()
+
+    def data(days, project) -> bytes:
+        with lock:
+            hit = cache.get((days, project))
+        if hit is None:
+            hit = json.dumps(summary(days, project, 25)).encode()
+            with lock:
+                cache[(days, project)] = hit
+        return hit
+
+    def keep_fresh():
+        """Reads new logs every minute and prepares the usual views, so that switching
+        between them answers at once."""
+        while True:
+            with contextlib.suppress(Exception):
+                done = update_index(quiet=True, pull=None)
+                if done["read"] or done["removed"] or any(m.get("read") for m in done.get("machines", {}).values()):
+                    with lock:
+                        cache.clear()
+                for days in (30, 7, 90, None):
+                    data(days, None)
+            time.sleep(60)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1394,10 +1479,8 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
             parsed = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             if parsed.path == "/data.json":
-                update_index(quiet=True, pull=None)
-                days = float(q.get("days") or 30) or None
-                body = json.dumps(summary(days, q.get("project") or None, 25)).encode()
-                kind = "application/json"
+                days = float(q.get("days") or 0) or None
+                body, kind = data(days, q.get("project") or None), "application/json"
             elif parsed.path == "/logo.svg":
                 body, kind = (HERE / "logo.svg").read_bytes(), "image/svg+xml"
                 if parsed.query == "dark":  # the bright variant, for the dark share card
@@ -1441,6 +1524,7 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
             return
         sys.exit(f"Cannot start the dashboard on port {port}: {error}. Try another port with --port.")
     update_index(pull=None)
+    threading.Thread(target=keep_fresh, daemon=True).start()
     print(f"Kuakgan dashboard on {url} (Ctrl+C to stop)", flush=True)
     if open_browser:
         open_window(url)

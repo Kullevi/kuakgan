@@ -92,6 +92,13 @@ details li { margin: 4px 0; }
 .share .side .btn { margin: 6px 6px 0 0; }
 
 .empty { color: var(--text-3); padding: 20px 0; }
+/* While new numbers load: the old ones dim, and a moving bar and a word say so. */
+.status { color: var(--text-3); font-size: 13px; min-width: 70px; }
+body.busy .status::before { content: "Loading…"; color: var(--accent); font-weight: 600; }
+body.busy .grid { opacity: .5; transition: opacity .15s .1s; }
+body::after { content: ""; position: fixed; top: 0; left: 0; height: 3px; width: 0; background: var(--accent); z-index: 10; }
+body.busy::after { animation: loadbar 1.6s ease-in-out infinite; }
+@keyframes loadbar { 0% { left: 0; width: 0; } 50% { left: 20%; width: 60%; } 100% { left: 100%; width: 0; } }
 .loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--page); color: var(--text-2); font-size: 15px; z-index: 5; text-align: center; }
 .private .name { filter: blur(6px); }
 footer { color: var(--text-3); font-size: 12.5px; margin: 18px 0 4px; text-align: center; }
@@ -111,6 +118,7 @@ footer a { color: var(--text-2); }
     </div>
     <select id="project"><option value="">All projects</option></select>
     <label class="toggle"><input type="checkbox" id="private"> Hide names</label>
+    <span class="status" id="status" aria-live="polite"></span>
   </div>
 </header>
 
@@ -118,7 +126,7 @@ footer a { color: var(--text-2); }
 
 <div class="grid" style="margin-top: var(--gap)">
   <div class="card span-8">
-    <div class="chart-head"><h2>Tokens per day, by model</h2>
+    <div class="chart-head"><h2 id="chart-title">Tokens per day, by model</h2>
       <div class="seg" id="metric"><button data-m="tokens" class="on">Tokens</button><button data-m="cost">Cost</button><button data-m="output">Output</button></div></div>
     <div id="chart"></div><div class="legend" id="legend"></div>
   </div>
@@ -175,13 +183,24 @@ function ago(iso) {
   return Math.round(s / 86400) + " d ago";
 }
 
+let loadNumber = 0;
 async function load() {
+  const mine = ++loadNumber;  // a slower, older answer must not replace a newer one
   const q = new URLSearchParams({ days: state.days });
   if (state.project) q.set("project", state.project);
-  const res = await fetch("/data.json?" + q);
-  state.data = await res.json();
-  $("loading").style.display = "none";
-  render();
+  document.body.classList.add("busy");
+  try {
+    const res = await fetch("/data.json?" + q);
+    const data = await res.json();
+    if (mine !== loadNumber) return;
+    state.data = data;
+    $("loading").style.display = "none";
+    render();
+  } catch (e) {
+    if (mine === loadNumber) $("status").textContent = "Cannot reach Kuakgan. Is it still running?";
+  } finally {
+    if (mine === loadNumber) document.body.classList.remove("busy");
+  }
 }
 
 function render() {
@@ -216,35 +235,67 @@ function renderChart() {
   const rows = state.data.days, m = state.metric;
   if (!rows.length) { $("chart").innerHTML = `<div class="empty">No sessions in this period.</div>`; $("legend").innerHTML = ""; return; }
   const { order, colors } = modelColors();
-  const days = [...new Set(rows.map((r) => r.day))].sort();
-  const first = new Date(days[0] + "T00:00:00Z"), last = new Date(days[days.length - 1] + "T00:00:00Z");
-  const all = [];
-  for (let x = new Date(first); x <= last; x.setUTCDate(x.getUTCDate() + 1)) all.push(x.toISOString().slice(0, 10));
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const iso = (d) => d.toISOString().slice(0, 10);
+  // The period chosen, ending today; "All" starts at the first day with data.
+  const last = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00Z");
+  const dataFirst = new Date(rows.map((r) => r.day).sort()[0] + "T00:00:00Z");
+  let first = state.days ? new Date(last.getTime() - (state.days - 1) * 86400000) : dataFirst;
+  // Long periods are drawn per week (from Monday), so the bars stay readable.
+  const weekly = (last - first) / 86400000 > 100;
+  if (weekly) first = new Date(first.getTime() - ((first.getUTCDay() + 6) % 7) * 86400000);
+  const step = weekly ? 7 : 1;
+  const buckets = [];
+  for (let x = new Date(first); x <= last; x = new Date(x.getTime() + step * 86400000)) buckets.push(iso(x));
+  const bucketOf = (day) => {
+    if (!weekly) return day;
+    const d = new Date(day + "T00:00:00Z");
+    return iso(new Date(d.getTime() - ((d.getUTCDay() + 6) % 7) * 86400000));
+  };
   const val = (r) => (m === "cost" ? r.cost || 0 : m === "output" ? r.output : r.tokens);
-  const stack = {}; all.forEach((day) => stack[day] = {});
-  rows.forEach((r) => { if (stack[r.day]) stack[r.day][r.model] = (stack[r.day][r.model] || 0) + val(r); });
-  const max = Math.max(...all.map((day) => Object.values(stack[day]).reduce((a, b) => a + b, 0)), 1e-9);
-  const W = 900, H = 260, L = 48, B = 22, T = 8;
-  const bw = (W - L) / all.length;
-  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Usage per day">`;
+  const stack = {}; buckets.forEach((k) => stack[k] = {});
+  rows.forEach((r) => { const k = bucketOf(r.day); if (stack[k]) stack[k][r.model] = (stack[k][r.model] || 0) + val(r); });
+  const max = Math.max(...buckets.map((k) => Object.values(stack[k]).reduce((a, b) => a + b, 0)), 1e-9);
+  const W = 900, H = 270, L = 48, B = 34, T = 8;
+  const bw = (W - L) / buckets.length;
+  const show = (v) => (m === "cost" ? money(v) : fmt(v));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Usage per ${weekly ? "week" : "day"}">`;
   for (let i = 0; i <= 4; i++) {
     const y = T + (H - B - T) * (1 - i / 4);
     svg += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--line)" />`;
-    svg += `<text x="${L - 6}" y="${y + 4}" text-anchor="end">${m === "cost" ? money(max * i / 4) : fmt(max * i / 4)}</text>`;
+    svg += `<text x="${L - 6}" y="${y + 4}" text-anchor="end">${show(max * i / 4)}</text>`;
   }
-  all.forEach((day, i) => {
+  // Month boundaries: a faint line and the month's name, with the year in January and at the start.
+  let lastMonth = null, lastLabelX = -1e9;
+  buckets.forEach((k, i) => {
+    const d = new Date(k + "T00:00:00Z"), month = k.slice(0, 7);
+    if (month === lastMonth) return;
+    const x = L + i * bw, firstLabel = lastMonth === null;
+    lastMonth = month;
+    if (!firstLabel) svg += `<line x1="${x}" x2="${x}" y1="${T}" y2="${H - B + 4}" stroke="var(--line-strong)" stroke-dasharray="2 3" />`;
+    if (x - lastLabelX < 46) return;
+    lastLabelX = x;
+    const name = MONTHS[d.getUTCMonth()] + (firstLabel || d.getUTCMonth() === 0 ? " " + d.getUTCFullYear() : "");
+    svg += `<text x="${x + 3}" y="${H - B + 18}" text-anchor="start" font-weight="600">${name}</text>`;
+  });
+  if (!weekly && buckets.length <= 31) {  // day numbers when there is room
+    buckets.forEach((k, i) => {
+      if (i % Math.ceil(buckets.length / 15) === 0) svg += `<text x="${L + i * bw + bw / 2}" y="${H - B + 30}" text-anchor="middle" font-size="10">${+k.slice(8)}</text>`;
+    });
+  }
+  buckets.forEach((k, i) => {
     let y = H - B;
+    const label = weekly ? `week of ${k}` : k;
     for (const model of order) {
-      const v = stack[day][model] || 0;
+      const v = stack[k][model] || 0;
       if (!v) continue;
       const h = (H - B - T) * v / max;
       y -= h;
-      svg += `<rect x="${L + i * bw + bw * 0.12}" y="${y}" width="${Math.max(bw * 0.76, 1)}" height="${h}" fill="${colors[model]}" rx="${Math.min(2, bw / 6)}"><title>${day} · ${esc(model)}: ${m === "cost" ? money(v) : fmt(v)}</title></rect>`;
+      svg += `<rect x="${L + i * bw + bw * 0.12}" y="${y}" width="${Math.max(bw * 0.76, 1)}" height="${h}" fill="${colors[model]}" rx="${Math.min(2, bw / 6)}"><title>${label} · ${esc(model)}: ${show(v)}</title></rect>`;
     }
-    const step = Math.ceil(all.length / 10);
-    if (i % step === 0) svg += `<text x="${L + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">${day.slice(5)}</text>`;
   });
   $("chart").innerHTML = svg + "</svg>";
+  $("chart-title").textContent = `${m === "cost" ? "Cost" : m === "output" ? "Output tokens" : "Tokens"} per ${weekly ? "week" : "day"}, by model`;
   $("legend").innerHTML = order.map((mo) => `<span style="--c:${colors[mo]}">${esc(mo)}</span>`).join("");
 }
 

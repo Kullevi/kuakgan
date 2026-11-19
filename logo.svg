@@ -1,25 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <!-- Kuakgan: a tree, as the kuakgan in Moon's books are tree-herds, with Kullevi's mark cut
-       out of its crown. The crown is a few overlapping circles; the trunk ends in roots. -->
+  <!-- Kuakgan: Kullevi's mark inside a tree's crown, a ring open at the bottom where a trunk
+       would rise (a kuakgan in Moon's books is a tree-herd). Girdish's ring opens at the top. -->
   <style>g { color: #0f9d6b } @media (prefers-color-scheme: dark) { g { color: #2fd08b } }</style>
-  <defs>
-    <mask id="mark">
-      <rect width="100" height="100" fill="#fff"/>
-      <!-- Kullevi's mark, with a thin gap around it so it reads against the crown. -->
-      <circle cx="50" cy="40" r="17.5" fill="#000"/>
-      <path d="M42,23.09 A30,30 0 1 0 58,23.09 L58,40 A8,8 0 0 1 42,40 Z" fill="#fff"
-            transform="translate(50 40) scale(.46) translate(-50 -52)"/>
-    </mask>
-  </defs>
   <g fill="currentColor">
-    <g mask="url(#mark)">
-      <circle cx="50" cy="26" r="21"/>
-      <circle cx="50" cy="46" r="20"/>
-      <circle cx="28" cy="42" r="18"/>
-      <circle cx="72" cy="42" r="18"/>
-      <circle cx="38" cy="58" r="15"/>
-      <circle cx="62" cy="58" r="15"/>
-    </g>
-    <path d="M46,66 L54,66 C54,76 55,84 62,92 L55,92 C52,88 50.5,85 50,82 C49.5,85 48,88 45,92 L38,92 C45,84 46,76 46,66 Z"/>
+    <path d="M42,23.09 A30,30 0 1 0 58,23.09 L58,40 A8,8 0 0 1 42,40 Z" transform="translate(50 50) scale(.56) translate(-50 -52)"/>
+    <path d="M32,81.2 A36,36 0 1 1 68,81.2" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
   </g>
 </svg>

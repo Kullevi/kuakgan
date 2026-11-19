@@ -159,8 +159,9 @@ class KuakganTest(unittest.TestCase):
         self.assertEqual(row["input"], 6 * 100)       # cached input is not input
         self.assertEqual(row["cache_read"], 6 * 400)
         self.assertEqual(row["output"], 6 * 100)
-        self.assertIsNone(kuakgan.price_for("gpt-6.2-sol", kuakgan.load_prices()))
-        self.assertGreater(self.summary["totals"]["tokens_without_price"], 0)
+        # 100 uncached input at $2, 400 cached at $0.10 and 100 output at $10, six times.
+        self.assertAlmostEqual(row["cost"], 6 * (100 * 2 + 400 * 0.10 + 100 * 10) / 1e6, places=9)
+        self.assertIsNone(kuakgan.price_for("made-up-model-1", kuakgan.load_prices()))
 
     def test_polling(self):
         f = self.finding("polling")
@@ -206,6 +207,34 @@ class KuakganTest(unittest.TestCase):
         self.assertEqual(kuakgan.update_index(quiet=True)["read"], 1)
         db = kuakgan.connect()
         self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions WHERE id = 's1'").fetchone()[0], 1)
+
+    def test_history_kept_and_repriced(self):
+        # Prices change: costs are worked out again, from the tokens already counted.
+        db = kuakgan.connect()
+        before = db.execute("SELECT cost FROM sessions WHERE id = 'codex-1'").fetchone()[0]
+        db.close()
+        prices = TMP / "prices.json"
+        prices.write_text(json.dumps({"gpt-6.2-sol": {"input": 4, "output": 20, "cache_read": 0.2}}))
+        os.environ["KUAKGAN_PRICES"] = str(prices)
+        try:
+            db = kuakgan.connect()
+            after = db.execute("SELECT cost FROM sessions WHERE id = 'codex-1'").fetchone()[0]
+            self.assertAlmostEqual(after, 2 * before, places=9)
+            db.close()
+        finally:
+            del os.environ["KUAKGAN_PRICES"]
+            kuakgan.connect().close()
+        # A deleted log keeps its sessions in the index.
+        extra = ClaudeLog("gone-1")
+        extra.tool("Bash", {"command": "ls"})
+        path = extra.write()
+        kuakgan.update_index(quiet=True)
+        path.unlink()
+        kuakgan.update_index(quiet=True)
+        db = kuakgan.connect()
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions WHERE id = 'gone-1'").fetchone()[0], 1)
+        db.execute("DELETE FROM sessions WHERE id = 'gone-1'")
+        db.commit()
 
     def test_summary_shape(self):
         s = self.summary
