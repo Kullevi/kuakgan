@@ -95,10 +95,14 @@ select, .btn { font: inherit; font-weight: 600; color: var(--text); background: 
 .finding .top { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
 .finding .title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .finding .cost { color: var(--warn); font-weight: 650; white-space: nowrap; }
-.finding .tip { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.finding .tip { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.finding .ask { flex: none; border: 0; background: none; padding: 0; font: inherit; font-size: 12px; font-weight: 600;
+  color: var(--accent); cursor: pointer; }
+.finding .ask:hover { text-decoration: underline; }
+.shot-mode .finding .ask { display: none; }
 code { font: 600 1em ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--text); }
 .bar { height: 4px; background: var(--track); border-radius: 2px; margin-top: 4px; overflow: hidden; }
-.bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+.bar i { display: block; height: 100%; background: var(--faint); border-radius: 2px; }
 .place { flex: none; }
 .place .item { height: 20px; }
 
@@ -128,10 +132,10 @@ body.narrow { overflow: auto; }
     <span class="spacer"></span>
     <div class="tools">
       <span class="status num" id="status" aria-live="polite"></span>
-      <div class="seg" id="period"><button data-days="1">Today</button><button data-days="7">7 days</button><button data-days="30">30 days</button></div>
+      <div class="seg" id="period"><button data-days="1">24 hours</button><button data-days="7">7 days</button><button data-days="30">30 days</button></div>
       <select id="project" aria-label="Project"><option value="">All projects</option></select>
-      <button class="btn" id="private" type="button" aria-pressed="false" title="Numbers projects, sessions and machines instead of naming them, so the window can be shown">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>Private</button>
+      <button class="btn" id="private" type="button" aria-pressed="false" title="Hides project, session and machine names, so the window can be shown or shared">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l16 16M9.9 5.7A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-2.6 3.4M6.3 7.2C3.9 8.9 2.5 12 2.5 12S6 18.5 12 18.5c1.6 0 3-.4 4.2-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>Private</button>
       <button class="btn" id="shot" type="button" title="Copies a 1200x630 picture of this view, ready to paste into a post or a chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.4"/></svg><span id="shot-text">Screenshot</span></button>
     </div>
@@ -139,7 +143,7 @@ body.narrow { overflow: auto; }
   </header>
   <div class="body">
     <section class="card">
-      <div class="label">Estimated cost</div>
+      <div class="label">Cost at API prices</div>
       <div class="headline num" id="headline">–</div>
       <div class="subline num" id="subline"></div>
       <div class="stats" id="stats"></div>
@@ -149,8 +153,8 @@ body.narrow { overflow: auto; }
     </section>
     <div class="right">
       <section class="card">
-        <div class="card-head"><span class="label" id="chart-title">Tokens per day</span><span class="spacer"></span>
-          <div class="seg tools" id="metric"><button data-m="tokens">Tokens</button><button data-m="cost">Cost</button></div></div>
+        <div class="card-head"><span class="label" id="chart-title">Cost per day</span><span class="spacer"></span>
+          <div class="seg tools" id="metric"><button data-m="cost">Cost</button><button data-m="tokens">Tokens</button></div></div>
         <div id="chart"></div>
       </section>
       <div class="pair">
@@ -162,19 +166,22 @@ body.narrow { overflow: auto; }
 </main>
 
 <script>
-const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"], OTHER = "--s7";
+// Orange (--s3) comes last: it looks too much like the waste colour to be a big series.
+const SERIES = ["--s1", "--s2", "--s4", "--s6", "--s5", "--s3"], OTHER = "--s7";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const query = new URLSearchParams(location.search);
 const shotMode = query.get("shot") === "1";  // the copy the server draws for the Screenshot button
 if (shotMode) document.body.classList.add("shot-mode");
+// Days and hours are the viewer's own; the server is told the offset from UTC.
+const tz = query.has("tz") ? +query.get("tz") : -new Date().getTimezoneOffset();
 
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const store = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 const state = {
   days: [1, 7, 30].includes(+query.get("days")) ? +query.get("days") : 30,
   project: query.get("project") || "",
-  metric: query.get("metric") === "cost" ? "cost" : "tokens",
+  metric: query.get("metric") === "tokens" ? "tokens" : "cost",
   private: query.has("private") ? query.get("private") === "1" : stored("kuakgan.private") === "1",
   data: null,
   projectList: [],  // every project in the period, kept while one of them is chosen
@@ -192,20 +199,44 @@ dark.addEventListener("change", () => { theme(); if (state.data) render(); });
 
 function fmt(n) {
   if (n == null) return "–";
-  const a = Math.abs(n);
-  if (a >= 1e9) return (n / 1e9).toFixed(a >= 1e10 ? 0 : 1) + "B";
-  if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M";
-  if (a >= 1e3) return (n / 1e3).toFixed(a >= 1e4 ? 0 : 1) + "k";
+  const a = Math.abs(n), short = (x, d) => x.toFixed(d).replace(/\.0$/, "");
+  if (a >= 1e9) return short(n / 1e9, a >= 1e10 ? 0 : 1) + "B";
+  if (a >= 1e6) return short(n / 1e6, a >= 1e7 ? 0 : 1) + "M";
+  if (a >= 1e3) return short(n / 1e3, a >= 1e4 ? 0 : 1) + "k";
   return String(Math.round(n));
+}
+function words(n) {  // for sentences: "136 billion"
+  const a = Math.abs(n), short = (x) => x.toFixed(x >= 10 ? 0 : 1).replace(/\.0$/, "");
+  if (a >= 1e9) return short(n / 1e9) + " billion";
+  if (a >= 1e6) return short(n / 1e6) + " million";
+  return Math.round(n).toLocaleString("en-US");
 }
 function money(n) {
   if (n == null) return "–";
+  if (n === 0) return "$0";
   if (n >= 1000) return "$" + Math.round(n).toLocaleString("en-US");
   if (n >= 10) return "$" + n.toFixed(0);
   return "$" + n.toFixed(2);
 }
 const pct = (x) => (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
 const md = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : many}`;
+const plain = (s) => String(s || "").replace(/[`*#>_]+/g, "").replace(/\s+/g, " ").trim();
+
+// Model ids as people say them: claude-opus-5-5 is Opus 5.5, gpt-6.2-sol is GPT-6.2 Sol.
+function modelName(id) {
+  const title = (w) => w.charAt(0).toUpperCase() + w.slice(1);
+  let m = String(id || "").replace(/-\d{8}$/, "");
+  if (/^gpt-/i.test(m)) {
+    const [, version, ...rest] = m.split("-");
+    return ["GPT-" + version, ...rest.map(title)].join(" ");
+  }
+  if (/^claude-/.test(m)) {
+    m = m.slice(7).replace(/(\d)-(?=\d)/g, "$1.");
+    return m.split("-").map(title).join(" ");
+  }
+  return m;
+}
 
 // Private mode replaces everything that could say what someone works on: project, session
 // and machine names. Model names, numbers and the general fixes stay.
@@ -215,11 +246,13 @@ function names() {
   return { project: (p) => state.private ? (projects[p] || "Another project") : p };
 }
 
-// The frame keeps its 1200x630 design and is scaled to the window.
+// The frame keeps its 1200x630 design and is scaled to the window; when that would make
+// the text too small to read, the cards stack instead and the page scrolls.
 function fit() {
-  const narrow = innerWidth < 720 && !shotMode;
+  const scale = Math.min(innerWidth / 1200, innerHeight / 630);
+  const narrow = !shotMode && (innerWidth < 960 || scale < 0.7);
   document.body.classList.toggle("narrow", narrow);
-  document.documentElement.style.setProperty("--scale", narrow ? 1 : Math.min(innerWidth / 1200, innerHeight / 630));
+  document.documentElement.style.setProperty("--scale", narrow ? 1 : scale);
 }
 
 // The app window opens at the browser's chosen or remembered size; once, make its
@@ -236,29 +269,34 @@ if (query.get("app") === "1" && !shotMode) {
   if (document.readyState === "complete") fitWindow(); else addEventListener("load", fitWindow);
 }
 
-// Shows as many whole items as fit, and says how many more there are.
-// The count goes in the card's head when one is given, so the list keeps its room.
+// Shows as many whole items as fit. How many are shown goes in the card's head, or
+// below the list as "and N more" when there is no head for it.
 function fill(box, items, more, countBox, count) {
   box.innerHTML = items.join("");
-  if (countBox) countBox.textContent = items.length > 1 ? count(items.length) : "";
-  if (document.body.classList.contains("narrow")) return;
   let shown = items.length;
-  while (shown > 1 && box.scrollHeight > box.clientHeight + 1) {
-    shown--;
-    box.innerHTML = items.slice(0, shown).join("") + (more ? `<div class="more">${more(items.length - shown)}</div>` : "");
+  if (document.body.classList.contains("narrow") && items.length > 10) {  // a phone: the ten biggest
+    shown = 10;
+    box.innerHTML = items.slice(0, 10).join("") + `<div class="more">and ${items.length - 10} more</div>`;
+  } else if (!document.body.classList.contains("narrow")) {
+    while (shown > 1 && box.scrollHeight > box.clientHeight + 1) {
+      shown--;
+      box.innerHTML = items.slice(0, shown).join("") + (more ? `<div class="more">${more(items.length - shown)}</div>` : "");
+    }
   }
+  if (countBox) countBox.textContent = count(items.length, shown);
 }
+const shownOf = (word) => (total, shown) => total < 2 ? "" : shown < total ? `${shown} of ${total}` : `${total} ${word}`;
 
 let loadNumber = 0;
 async function load() {
   const mine = ++loadNumber;  // a slower, older answer must not replace a newer one
-  const q = new URLSearchParams({ days: state.days });
+  const q = new URLSearchParams({ days: state.days, tz });
   if (state.project) q.set("project", state.project);
   document.body.classList.add("busy");
   try {
     // Opened on one project: the whole list first, so Private mode can number it.
     if (state.project && !state.projectList.length) {
-      const all = await fetch("/data.json?days=" + state.days, { cache: "no-store" }).then((r) => r.json());
+      const all = await fetch(`/data.json?days=${state.days}&tz=${tz}`, { cache: "no-store" }).then((r) => r.json());
       state.projectList = all.projects.map((p) => p.project);
     }
     const res = await fetch("/data.json?" + q, { cache: "no-store" });
@@ -270,34 +308,50 @@ async function load() {
     $("loading").style.display = "none";
     $("status").classList.remove("bad");
     $("status").textContent = "";
-    render();
+    requestAnimationFrame(render);  // after layout, so the chart and lists know their size
   } catch (e) {
-    if (mine === loadNumber) { $("status").textContent = "Not answering"; $("status").classList.add("bad"); }
+    if (mine === loadNumber) {
+      $("status").textContent = "Lost connection: is Kuakgan still running?";
+      $("status").classList.add("bad");
+    }
   } finally {
     if (mine === loadNumber) document.body.classList.remove("busy");
   }
 }
 
 function colors() {
-  // In the order of the models list, so its first colours are the chart's biggest series.
+  // One order for every view (the last 30 days, all projects), so a model keeps its colour.
   const css = getComputedStyle(document.documentElement);
-  const order = [...new Set([...state.data.models.map((m) => m.model), ...state.data.days.map((r) => r.model)])];
+  const d = state.data;
+  const order = [...new Set([...(d.model_order || []), ...d.models.map((m) => m.model), ...d.days.map((r) => r.model)])];
   const color = {};
   order.forEach((m, i) => color[m] = css.getPropertyValue(i < SERIES.length ? SERIES[i] : OTHER).trim());
   return { order, color };
+}
+
+function localKey(date, hourly) {
+  const p = (n) => String(n).padStart(2, "0");
+  const day = `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  return hourly ? `${day}T${p(date.getHours())}` : day;
 }
 
 function render() {
   const d = state.data, t = d.totals, nm = names();
   const days = d.period_days;
   const when = days === 1 ? "Last 24 hours" : `Last ${days} days`;
-  const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });  // the chart's days are UTC days
-  $("scope").textContent = [when, state.project ? nm.project(state.project) : "All projects", shotMode ? date : ""].filter(Boolean).join(" · ");
+  const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  $("scope").textContent = [shotMode ? "Claude Code and Codex" : "", when,
+    state.project ? nm.project(state.project) : "All projects", shotMode ? date : ""].filter(Boolean).join(" · ");
   $("headline").textContent = money(t.cost);
-  $("subline").textContent = `${fmt(t.tokens)} tokens at API list prices` + (t.tokens_without_price ? `, plus ${fmt(t.tokens_without_price)} without a price` : "");
+  $("subline").textContent = !t.tokens ? "No Claude Code or Codex sessions in this period yet."
+    : `${words(t.tokens)} tokens. On a subscription you pay a flat fee instead.`
+      + (t.tokens_without_price ? ` ${words(t.tokens_without_price)} have no known price.` : "");
   const stat = (v, k, cls = "") => `<div class="stat ${cls}"><b class="num">${v}</b><span>${k}</span></div>`;
-  $("stats").innerHTML = stat(fmt(t.sessions), "sessions") + stat(fmt(t.model_calls), "model calls") +
-    stat(pct(t.waste_share), t.waste_cost ? `wasted · ${money(t.waste_cost)}` : "steps wasted", "warn");
+  const waste = t.waste_cost
+    ? stat(money(t.waste_cost), `wasted · ${pct(t.waste_cost_share || 0)}`, "warn")
+    : stat(pct(t.waste_share), "of steps wasted", "warn");
+  $("stats").innerHTML = stat(fmt(t.sessions), t.sessions === 1 ? "session" : "sessions")
+    + stat(fmt(t.prompts), t.prompts === 1 ? "your message" : "your messages") + waste;
   const list = state.projectList.includes(state.project) || !state.project ? state.projectList : [state.project, ...state.projectList];
   $("project").innerHTML = `<option value="">All projects</option>` + list.map((p) => `<option value="${esc(p)}">${esc(nm.project(p))}</option>`).join("");
   $("project").value = state.project;
@@ -306,13 +360,14 @@ function render() {
 
 function renderModels() {
   const ms = state.data.models, { color } = colors();
-  const total = ms.reduce((a, m) => a + m.tokens, 0) || 1;
-  $("strip").innerHTML = ms.filter((m) => m.tokens / total >= .004)
-    .map((m) => `<i style="flex:${m.tokens};background:${color[m.model]}" title="${esc(m.model)}"></i>`).join("");
+  const size = (m) => (state.data.totals.cost ? m.cost || 0 : m.tokens);  // the strip shows what costs most
+  const total = ms.reduce((a, m) => a + size(m), 0) || 1;
+  $("strip").innerHTML = ms.filter((m) => size(m) / total >= .004)
+    .map((m) => `<i style="flex:${size(m)};background:${color[m.model]}" title="${esc(modelName(m.model))}"></i>`).join("");
   if (!ms.length) { $("models").innerHTML = `<div class="empty">No model calls in this period.</div>`; return; }
-  fill($("models"), ms.map((m) => `<div class="item" title="${esc(m.model)} · ${m.source} · ${fmt(m.requests)} calls">
-    <span class="dot" style="background:${color[m.model]}"></span><span class="name">${esc(m.model)}</span>
-    <span class="v num"><b>${fmt(m.tokens)}</b> · ${m.priced === false ? "no price" : money(m.cost)}</span></div>`),
+  fill($("models"), ms.map((m) => `<div class="item" title="${esc(m.model)} · ${m.source} · ${fmt(m.requests)} model calls">
+    <span class="dot" style="background:${color[m.model]}"></span><span class="name">${esc(modelName(m.model))}</span>
+    <span class="v num"><b>${m.priced === false ? "no price" : money(m.cost)}</b> · ${fmt(m.tokens)}</span></div>`),
     (n) => `and ${n} more model${n > 1 ? "s" : ""}`);
 }
 
@@ -320,12 +375,14 @@ function renderChart() {
   const rows = state.data.days, m = state.metric, box = $("chart");
   $("chart-title").textContent = (m === "cost" ? "Cost per " : "Tokens per ") + (state.data.step === "hour" ? "hour" : "day");
   const { order, color } = colors();
-  // A day is shown hour by hour (keys in UTC, labels in local time); longer periods by day.
-  const hourly = state.data.step === "hour", len = hourly ? 13 : 10, unit = hourly ? 3600000 : 86400000;
-  const now = new Date(), last = new Date(now.toISOString().slice(0, len) + (hourly ? ":00:00Z" : "T00:00:00Z"));
-  const n = hourly ? 24 : state.data.period_days;
+  // Local days, or local hours for the last 24 hours, from the start of the period to now.
+  const hourly = state.data.step === "hour", unit = hourly ? 3600000 : 86400000;
   const buckets = [];
-  for (let i = n - 1; i >= 0; i--) buckets.push(new Date(last.getTime() - i * unit).toISOString().slice(0, len));
+  for (let at = state.data.since * 1000; ; at += unit) {
+    const k = localKey(new Date(Math.min(at, Date.now())), hourly);
+    if (buckets[buckets.length - 1] !== k) buckets.push(k);
+    if (at >= Date.now()) break;
+  }
   const val = (r) => (m === "cost" ? r.cost || 0 : r.tokens);
   const stack = {}; buckets.forEach((k) => stack[k] = {});
   rows.forEach((r) => { if (stack[r.day]) stack[r.day][r.model] = (stack[r.day][r.model] || 0) + val(r); });
@@ -340,7 +397,15 @@ function renderChart() {
   const show = (v) => (m === "cost" ? money(v) : fmt(v));
   const L = 48, B = 24, T = 8;
   const slot = (W - L) / buckets.length, bw = Math.min(slot * .64, 24);
-  let svg = `<svg width="${W}" height="${H}" role="img" aria-label="${m === "cost" ? "Cost" : "Tokens"} per day"><defs>`;
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const dayName = (k) => { const [y, mo, dd] = k.slice(0, 10).split("-"); return `${+dd} ${MONTHS[mo - 1]}`; };
+  const label = (k) => {
+    if (!hourly) return dayName(k);
+    const h = +k.slice(11, 13);  // midnight shows the day it starts
+    return h ? String(h).padStart(2, "0") + ":00" : DAYS[new Date(k.slice(0, 10) + "T12:00:00").getDay()];
+  };
+  let svg = `<svg width="${W}" height="${H}" role="img" aria-label="${m === "cost" ? "Cost" : "Tokens"} per ${hourly ? "hour" : "day"}"><defs>`;
   buckets.forEach((k, i) => {
     if (!sums[i]) return;
     const h = (H - B - T) * sums[i] / max, x = L + i * slot + (slot - bw) / 2;
@@ -353,55 +418,71 @@ function renderChart() {
     svg += `<text x="${L - 12}" y="${y + 4}" text-anchor="end">${show(step * i)}</text>`;
   }
   const every = Math.ceil(buckets.length / Math.max(1, Math.floor((W - L) / 44)));
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   buckets.forEach((k, i) => {
-    const x = L + i * slot + slot / 2;
-    const label = hourly ? String(new Date(k + ":00:00Z").getHours()).padStart(2, "0") + ":00"
-      : (([y, mo, d]) => `${+d} ${MONTHS[mo - 1]}`)(k.split("-"));
-    if ((buckets.length - 1 - i) % every === 0) svg += `<text x="${x}" y="${H - 4}" text-anchor="middle">${label}</text>`;
+    const x = L + i * slot + slot / 2, current = i === buckets.length - 1;
+    if ((buckets.length - 1 - i) % every === 0) svg += `<text x="${x}" y="${H - 4}" text-anchor="middle">${label(k)}</text>`;
+    if (!sums[i]) return;
+    // The current day or hour is not over yet: drawn lighter.
+    const parts = order.filter((model) => stack[k][model]).map((model) => `${modelName(model)}: ${show(stack[k][model])}`);
+    const when = hourly ? `${dayName(k)}, ${k.slice(11, 13)}:00` : dayName(k);
+    svg += `<g clip-path="url(#c${i})"${current ? ' opacity=".55"' : ""}><title>${esc(when)}${current ? " (so far)" : ""} · ${show(sums[i])}\n${esc(parts.join("\n"))}</title>`;
     let y = H - B;
-    svg += `<g clip-path="url(#c${i})">`;
     for (const model of order) {
       const v = stack[k][model] || 0;
       if (!v) continue;
       const h = (H - B - T) * v / max;
       y -= h;
-      svg += `<rect x="${L + i * slot + (slot - bw) / 2}" y="${y}" width="${bw}" height="${h}" fill="${color[model]}"><title>${k} · ${esc(model)}: ${show(v)}</title></rect>`;
+      svg += `<rect x="${L + i * slot + (slot - bw) / 2}" y="${y}" width="${bw}" height="${h}" fill="${color[model]}"/>`;
     }
     svg += `</g>`;
   });
   box.innerHTML = svg + "</svg>";
 }
 
+// What an agent needs to look into one finding and suggest the best fix itself.
+function askAgent(f) {
+  const days = state.data.period_days, fix = Object.values(f.fix || {})[0] || "";
+  return `Kuakgan (which reads my Claude Code and Codex logs) found this in the last ${days === 1 ? "24 hours" : days + " days"}`
+    + `${state.project ? ` in project ${state.project}` : ""}: ${f.title}. ${f.what} `
+    + `It happened ${f.calls.toLocaleString("en-US")} times in ${f.sessions.toLocaleString("en-US")} sessions`
+    + `${f.cost ? ` and cost about ${money(f.cost)}` : ""}. Kuakgan's own suggestion: ${fix} `
+    + `Look at where it happens (\`${state.data.command} findings\` gives the details), work out why, and suggest `
+    + `the best way to stop it for how I work. Make no lasting change before I agree.`;
+}
+
 function renderFindings() {
   const fs = state.data.findings;
-  if (!fs.length) { $("findings").innerHTML = `<div class="empty">Nothing wasteful found in this period.</div>`; return; }
-  fill($("findings"), fs.map((f) => {
-    const value = f.cost ? money(f.cost) : `${fmt(f.tokens)} tokens`;
-    const full = Object.values(f.fix)[0];
-    return `<div class="finding" title="${esc(full)}"><div class="top"><span class="title">${esc(f.title)}</span>
-      <span class="cost num">${value}</span></div><div class="tip">${md(f.short || full)}</div></div>`;
-  }), null, $("findings-count"), (n) => `${n} found`);
+  if (!fs.length) { $("findings").innerHTML = `<div class="empty">No waste found in this period. Nice.</div>`; $("findings-count").textContent = ""; return; }
+  fill($("findings"), fs.map((f, i) => {
+    const value = f.cost != null ? money(f.cost) : `${fmt(f.tokens)} tokens`;
+    return `<div class="finding" title="${esc(Object.values(f.fix)[0])}"><div class="top"><span class="title">${esc(f.title)}</span>
+      <span class="cost num">${value}</span></div><div class="top"><span class="tip">${md(f.short)}</span>
+      <button class="ask" type="button" data-i="${i}" title="Copies a request for your Claude or Codex session to look into this">Ask my agent</button></div></div>`;
+  }), null, $("findings-count"), shownOf("found"));
+  $("findings").querySelectorAll(".ask").forEach((b) => b.onclick = () => {
+    const done = (msg) => { b.textContent = msg; setTimeout(() => b.textContent = "Ask my agent", 2500); };
+    navigator.clipboard.writeText(askAgent(fs[+b.dataset.i])).then(() => done("Copied: paste it to your agent"), () => done("Could not copy"));
+  });
 }
 
 // One project chosen: its most expensive sessions. Otherwise: projects.
 function renderWhere() {
   const d = state.data, nm = names();
-  const place = (name, value, share) => `<div class="place"><div class="item"><span class="name">${name}</span>
+  const place = (name, value, share, title = "") => `<div class="place" title="${esc(title)}"><div class="item"><span class="name">${name}</span>
     <span class="v num"><b>${value}</b></span></div><div class="bar"><i style="width:${Math.max(1, Math.min(100, share * 100))}%"></i></div></div>`;
   if (state.project) {
     $("where-title").textContent = "Most expensive sessions";
     const ss = d.top_sessions, max = Math.max(...ss.map((s) => s.cost || 0), 1e-9);
-    if (!ss.length) { $("where").innerHTML = `<div class="empty">No sessions.</div>`; return; }
-    fill($("where"), ss.map((s, i) => place(state.private ? `Session ${i + 1}` : esc(s.title || s.id), money(s.cost), (s.cost || 0) / max)),
-      null, $("where-count"), () => "");
+    if (!ss.length) { $("where").innerHTML = `<div class="empty">No sessions.</div>`; $("where-count").textContent = ""; return; }
+    fill($("where"), ss.map((s, i) => place(state.private ? `Session ${i + 1}` : esc(plain(s.title) || s.id), money(s.cost), (s.cost || 0) / max,
+      state.private ? "" : plain(s.title))), null, $("where-count"), shownOf("sessions"));
     return;
   }
   $("where-title").textContent = "Projects";
-  if (!d.projects.length) { $("where").innerHTML = `<div class="empty">No projects.</div>`; return; }
+  if (!d.projects.length) { $("where").innerHTML = `<div class="empty">No projects.</div>`; $("where-count").textContent = ""; return; }
   const max = Math.max(...d.projects.map((p) => p.cost || 0), 1e-9);
   fill($("where"), d.projects.map((p) => place(esc(nm.project(p.project)), money(p.cost), (p.cost || 0) / max)),
-    null, $("where-count"), (n) => `${d.totals.projects || n} in all`);
+    null, $("where-count"), shownOf("in all"));
 }
 
 function setControls() {
@@ -422,7 +503,7 @@ $("private").onclick = () => {
 $("shot").onclick = () => {
   const btn = $("shot"), text = $("shot-text"), done = (msg) => { text.textContent = msg; setTimeout(() => { text.textContent = "Screenshot"; btn.disabled = false; }, 3500); };
   btn.disabled = true; text.textContent = "Taking picture…";
-  const q = new URLSearchParams({ w: 1200, h: 630, days: state.days, metric: state.metric, private: state.private ? "1" : "0", theme: theme() });
+  const q = new URLSearchParams({ days: state.days, metric: state.metric, private: state.private ? "1" : "0", theme: theme(), tz });
   if (state.project) q.set("project", state.project);
   const png = fetch("/screenshot.png?" + q, { headers: { "X-Kuakgan": "shot" }, cache: "no-store" })
     .then((r) => r.ok ? r.blob() : Promise.reject(new Error(r.status === 501 ? "Needs Edge or Chrome" : `HTTP ${r.status}`)));

@@ -718,8 +718,8 @@ def connect(fresh: bool = False) -> sqlite3.Connection:
         version = db.execute("SELECT value FROM meta WHERE key='version'").fetchone()
     if version is not None and version[0].isdigit() and int(version[0]) > INDEX_VERSION and not fresh:
         db.close()
-        raise IndexNewer("This index was made by a newer Kuakgan. Stop the older one that is still "
-                         "running (`kuakgan dashboard --stop`) and start the new one.")
+        raise IndexNewer("This index was made by a newer Kuakgan. Start the new one with "
+                         f"`{own_command()} dashboard`; it replaces the older one that is still running.")
     if fresh or version is None or version[0] != str(INDEX_VERSION):
         for table in ("meta", "files", "sessions", "usage", "calls", "findings"):
             db.execute(f"DROP TABLE IF EXISTS {table}")
@@ -1212,12 +1212,12 @@ FIXES = {
     },
     "failures": {
         "title": "Failed commands",
-        "short": "Run `kuakgan check` before each task.",
+        "short": "Let your agents see earlier mistakes.",
         "what": "Commands that failed. Many failures repeat across sessions: the same wrong "
                 "command, path or tool, fixed again each time.",
-        "claude": "Run `kuakgan check` at the start of a task: it lists the commands that failed "
-                  "before in this project and what worked instead, so the agent gets it right the "
-                  "first time.",
+        "claude": "Have your agents run Kuakgan's check at the start of a task (setup step 4 in "
+                  "the README): it lists the commands that failed before in this project and what "
+                  "worked instead, so the agent gets it right the first time.",
     },
     "scripts": {
         "title": "The same helper script, rewritten",
@@ -1461,6 +1461,7 @@ def summary(days=30, project=None, sessions_limit=10, tz=0) -> dict:
         "step": "hour" if days <= 1 else "day",
         "since": since_ts(days), "tz": int(tz),
         "model_order": model_order,
+        "command": own_command(),  # for a request the dashboard copies to an agent
         "projects": projects,
         "top_sessions": top,
         "findings": findings,
@@ -1635,7 +1636,11 @@ and again, and how this session is doing. These are observations, not rules.
 Judge which ones matter and why they happen, then solve them the best way: change
 how you work now, and when a lasting change would help (a line in the project's
 instructions, a saved script, a setting, a small tool) propose it to the user
-with what it would save, and make it once they agree."""
+with what it would save, and make it once they agree.
+
+When the user wants to see their usage, open the dashboard with:
+
+    {cmd} dashboard"""
 
 
 # ---------- dashboard ----------
@@ -1699,6 +1704,15 @@ def screenshot(url: str, width: int, height: int) -> bytes | None:
         return None
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+
+
+def own_command() -> str:
+    """The exact command that runs this Kuakgan, for messages and instructions."""
+    quote = lambda p: f'"{p}"' if " " in p else p
+    python = Path(sys.executable)
+    if python.stem.lower() == "pythonw":  # started from a shortcut; a terminal needs python
+        python = python.with_name("python" + python.suffix)
+    return f"{quote(python.as_posix())} {quote((HERE / 'kuakgan.py').as_posix())}"
 
 
 def code_version() -> str:
@@ -1888,13 +1902,13 @@ def start_in_background(port: int, open_browser: bool) -> int:
                      close_fds=True, **options)
     for _ in range(120):
         if dashboard_answers(url):
-            print(f"Kuakgan dashboard on {url}; stop it with `kuakgan dashboard --stop"
+            print(f"Kuakgan dashboard on {url}; stop it with `{own_command()} dashboard --stop"
                   + (f" --port {port}" if port != 8766 else "") + "`.")
             if open_browser:
                 open_window(url)
             return 0
         time.sleep(0.5)
-    print(f"The dashboard did not answer on {url}; run `kuakgan dashboard` to see why.")
+    print(f"The dashboard did not answer on {url}; run `{own_command()} dashboard` to see why.")
     return 1
 
 
@@ -1969,9 +1983,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             out(answer)
     elif args.command == "instructions":
-        quote = lambda p: f'"{p}"' if " " in p else p
-        cmd = f"{quote(Path(sys.executable).as_posix())} {quote((HERE / 'kuakgan.py').as_posix())}"
-        print(INSTRUCTIONS.format(cmd=cmd))
+        print(INSTRUCTIONS.format(cmd=own_command()))
     elif args.command == "index":
         if args.rebuild:
             # Emptied in place rather than deleted, so a running dashboard keeps a valid index.

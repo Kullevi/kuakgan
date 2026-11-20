@@ -14,9 +14,15 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    whole, so a session's numbers never drift; the first run uses several
    processes. Periods are at most 30 days, since Claude Code deletes
    conversations after that by default. Changing how logs are read bumps an index version, and the index is
-   then rebuilt from the logs that are left.
+   then rebuilt from the logs that are left; an older Kuakgan never rebuilds a newer index, and
+   `dashboard` replaces an older copy that is still running. Each write is its own short
+   transaction, so a hook's `check` never waits on the dashboard reading logs.
 3. **One model call, one cost.** Claude Code writes an assistant message as
-   several lines with the same message id; usage is counted once per id.
+   several lines with the same message id, the earlier ones with a partial output
+   count; usage is counted once per id, from the largest values. A forked
+   sub-agent's log starts with a copy of the conversation it was forked from;
+   those messages count for the agent that made them. A Codex sub-agent's log
+   repeats its parent's `session_meta` after its own; the first one names it.
    Codex repeats a `token_count` event; one whose running total has not changed
    is skipped. Codex reports cached input inside input tokens; Kuakgan counts
    it as cache read only. A tool call carries the cost of the model call that
@@ -51,14 +57,19 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    read it joins the repository that at least four in five of the worktrees beside
    it belong to; otherwise it keeps its folder name.
 9. **Other machines are read where they are.** `machines add` remembers a
-   computer reachable over SSH without a password. Kuakgan then sends its own
+   computer reachable over SSH without a password; `machines seen` lists computers
+   the sessions used over SSH, for the agent and user to judge. Kuakgan then sends its own
    source over SSH to that computer's Python, which lists its logs and reads only
    the new or changed ones; only the results come back. Nothing is installed
    there, and the logs never leave it. Other machines are fetched at most every
    ten minutes, except by `index`.
 10. **The dashboard is one page.** `kuakgan.py dashboard` serves
    `dashboard.html` and `/data.json` on 127.0.0.1, refusing requests for any
-   other host name (DNS rebinding). It is designed as one 1200×630
+   other host name (DNS rebinding). Days and hours are the viewer's local ones.
+   Cost leads, labelled as API prices, since many users pay a flat fee. Each
+   model keeps one colour in every view, and models are named as people say them.
+   "Ask my agent" copies a request for the user's agent to look into one finding
+   and suggest a fix, rather than the dashboard prescribing one. It is designed as one 1200×630
    frame (a link preview's size) and scaled to the window; each list shows as
    many whole rows as fit and counts the rest, so nothing is cut off. A narrow
    window stacks the cards instead. The Screenshot button has Edge or Chrome

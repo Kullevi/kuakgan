@@ -87,17 +87,18 @@ user about it in a sentence or two and why. Set it up only if they ask.
 ## Setup (for the agent doing it)
 
 You are setting this up for a user who may have little experience with
-terminals. Do the steps yourself; ask the user only where a step says so.
+terminals. Do every step yourself. Ask the user only to say yes to installing
+something that is missing, and one question in step 4, after they have seen
+their dashboard.
 
-### 1. Python and the files
+### 1. Python, Git and the files
 
-Kuakgan needs **Python 3.9 or newer** and nothing else. You, the agent, check
-for it and install it for the user if it is missing; the user should not have
-to do anything but say yes. Try `python3 --version`,
-then `python --version` and `py -3 --version`. On Windows, `python3` and
-sometimes `python` are a Microsoft Store placeholder that prints a message
-instead of a version; use whichever command prints a real version, the
-newest if several do.
+Kuakgan needs **Python 3.9 or newer** and nothing else. Check for it and
+install it if it is missing; the user should not have to do anything but say
+yes. Try `python3 --version`, then `python --version` and `py -3 --version`.
+On Windows, `python3` and sometimes `python` are a Microsoft Store placeholder
+that prints a message instead of a version; use whichever command prints a
+real version, the newest if several do.
 
 - Missing on Windows: tell the user this installs Python and accepts the
   winget/Microsoft terms, and with their OK run
@@ -106,111 +107,101 @@ newest if several do.
   so do not ask for a restart: try `py -3 --version` (the launcher usually
   works at once), or call Python by its full path,
   `%LOCALAPPDATA%\Programs\Python\Python312\python.exe` (in Git Bash
-  `"$LOCALAPPDATA/Programs/Python/Python312/python.exe"`). Use that command
-  or full path in every later step, including the hook in `settings.json`.
+  `"$LOCALAPPDATA/Programs/Python/Python312/python.exe"`).
 - Missing on macOS: `xcode-select --install` opens a window where the user
-  clicks **Install**.
+  clicks **Install**. It brings Git too.
 
-Clone Kuakgan into the user's home folder:
+Clone Kuakgan into the user's home folder with Git (`git --version` shows
+whether it is there; on Windows `winget install -e --id Git.Git` installs it):
 
 ```
 git clone https://github.com/Kullevi/kuakgan.git ~/kuakgan
 ```
 
-(On Windows, give the full path instead of `~/kuakgan`, such as
-`C:/Users/NAME/kuakgan`.) Below, `kuakgan` stands for
-`<python> <home>/kuakgan/kuakgan.py` with the Python command that worked.
+On Windows, give the full path instead of `~/kuakgan`, such as
+`C:/Users/NAME/kuakgan`. Then run `<python> <home>/kuakgan/kuakgan.py instructions`
+with the Python that worked: the block it prints ends with the exact command
+that runs Kuakgan on this computer, with full paths. Below, `kuakgan` stands for
+that command; use it whole in every step, so all of them use the same Python.
 
 ### 2. Read the logs once
 
 Run `kuakgan index`. The first run reads all of the user's Claude Code and
-Codex logs; 10 to 20 GB of logs take between half a minute and a few minutes, and it prints
-its progress. Later runs read only what is new, in a second or two. Then run
-`kuakgan summary`, which gives the main points in a few kilobytes of JSON, and
-tell the user in a few plain sentences what it shows: tokens and estimated
-cost in the last 30 days, the main models, and the biggest waste with its fix.
-If much of the usage comes from models without a price, say so: the dollar
-figure then leaves that part out (`cost_note` says how much).
+Codex logs; 10 to 20 GB of logs take between half a minute and a few minutes,
+and it prints its progress. Later runs read only what is new, in a second or
+two. Then run `kuakgan summary`, which gives the main points as JSON, and tell
+the user in a few plain sentences what it shows: tokens and estimated cost in
+the last 30 days, the main models, and the biggest waste. If much of the usage
+comes from models without a price, say so: `totals.tokens_without_price`
+says how many tokens the dollar figure leaves out.
 
 Kuakgan finds the logs in `~/.claude/projects`, `~/.codex/sessions` and
 `~/.codex/archived_sessions` (or under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
 when those are set). If a folder is missing, that tool has simply not been
-used on this computer.
+used on this computer. Kuakgan looks back at most 30 days: Claude Code deletes
+conversations older than that by default.
 
-Kuakgan looks back at most 30 days: Claude Code deletes conversations older
-than that by default, so a longer period would only look empty.
-
-### 3. Other computers (Agent, after asking the user)
-
-Ask the user whether they also run Claude Code or Codex on other computers,
-such as a second laptop or build machines. If they do, this computer can
-include those logs too, so the dashboard shows all of their usage and
-`kuakgan check` learns from mistakes made on every machine. Nothing is
-installed on the other computers: Kuakgan reads their logs over SSH, and only
-the results travel.
-
-Each other computer needs:
-
-- **SSH from this computer without a password.** Check with
-  `ssh -o BatchMode=yes USER@ADDRESS echo ok`, which must print `ok` without
-  asking for anything. If the user has
-  [Girdish](https://github.com/Kullevi/girdish) set up, its machines already
-  work. Otherwise help the user turn on SSH and copy this computer's key
-  there; the [Girdish README](https://github.com/Kullevi/girdish#setup-for-the-agent-doing-it)
-  has the exact steps for Linux, macOS and Windows. Any step that asks for a
-  password is for the user to run in their own terminal, never in chat.
-- **Python 3.9 or newer** there (usual on Linux and macOS; on Windows see
-  step 1).
-
-Then add each computer:
-
-```
-kuakgan machines add NAME USER@ADDRESS
-```
-
-`NAME` is a short name the user recognises, such as `build-pc`. Instead of
-`USER@ADDRESS` you can give a `Host` alias from `~/.ssh/config`, and `--key`
-and `--port` when needed. The first time, that computer reads all of its own
-logs, which takes as long as step 2 did here. Afterwards `summary`, `findings`
-and the dashboard fetch what is new from every machine at most every ten
-minutes, and `kuakgan index` does it at once. `kuakgan machines` lists them;
-a machine that is off is skipped and tried again next time.
-
-### 4. Show the user (Agent)
-
-Start the dashboard:
+### 3. Show the user
 
 ```
 kuakgan dashboard --background
 ```
 
 It starts as a process of its own, so it keeps running after your command
-returns, and answers once it is ready. It opens `http://127.0.0.1:8766/` in a
-window of its own (with Edge or Chrome installed; otherwise in a normal browser
-tab). On a computer without a screen, such as one you reach over SSH, it
-prints the address instead: give it to the user. Tell the user that:
+returns. It opens `http://127.0.0.1:8766/` in a window of its own (with Edge
+or Chrome installed; otherwise in a normal browser tab). On a computer without
+a screen, such as one you reach over SSH, it prints the address instead: give
+it to the user. Tell the user that:
 
 - the period buttons and the project menu change what is shown;
-- "Private" replaces project, session and machine names with numbers, so
-  the window can be shown or shared;
+- "Private" replaces project, session and machine names with numbers, so the
+  window can be shown or shared;
 - "Screenshot" copies a 1200×630 picture of the view, ready to paste into a post;
-- they can ask you to "open the Kuakgan dashboard" again later.
+- they can ask any Claude or Codex session to "open the Kuakgan dashboard" later.
 
-To stop it: `kuakgan dashboard --stop` (with the same `--port` if it was
-started with one).
+To stop it: `kuakgan dashboard --stop`.
 
-#### A shortcut and opening at login (ask the user)
+### 4. One question: keep it with them
 
-Ask the user whether they want a Kuakgan shortcut (desktop, Start menu or
-Dock) and whether the dashboard should open by itself when they log in. Do only
-what they say yes to. Every shortcut runs the same `dashboard` command, which
-starts Kuakgan if needed and otherwise just opens the window, and every one
-uses the Kuakgan logo shipped next to `kuakgan.py`. Fill in the full paths
-below; `PYTHON` is the full path of the Python you used, such as the output of
-`python3 -c "import sys; print(sys.executable)"`.
+Ask the user in one message whether they want:
 
-**Windows** (PowerShell; `pythonw.exe` sits next to `python.exe` and runs
-without a console window):
+1. **Tips for their agents** (recommended): every new Claude Code or Codex
+   session learns from earlier mistakes and waste in its project, and judges
+   what to do about it. This is what makes Kuakgan useful every day rather
+   than once.
+2. **A Kuakgan shortcut**, and whether it should also open by itself when they
+   log in.
+
+Do what they say yes to.
+
+**Tips for their agents.** Add the block that `kuakgan instructions` prints to
+the user's own instructions, so it applies to every project:
+`~/.claude/CLAUDE.md` for Claude Code and/or `~/.codex/AGENTS.md` for Codex
+(only for the tools they use; create the file if it is missing, and add to
+what is there). For Claude Code, also have the tips arrive by themselves at the
+start of every session: add a `SessionStart` hook to `~/.claude/settings.json`
+(merge it with what is there; do not replace the file), with `kuakgan` replaced by the full
+command, as everywhere (in JSON, write any `"` in it as `\"`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "kuakgan check --hook" } ] }
+    ]
+  }
+}
+```
+
+Run that hook command once yourself: it prints a few short lines, which
+Claude Code adds to each new session.
+
+**A shortcut.** Every shortcut runs the same `dashboard` command, which starts
+Kuakgan if needed and otherwise just opens the window, and uses the Kuakgan
+logo next to `kuakgan.py`. Fill in the full paths below.
+
+**Windows** (PowerShell; `pythonw.exe`, next to the `python.exe` in the
+command, runs without a console window):
 
 ```
 $py = 'C:\FULL\PATH\pythonw.exe'; $dir = 'C:\Users\NAME\kuakgan'
@@ -229,7 +220,8 @@ ones the user did not want. Windows does not let programs pin to the taskbar:
 tell the user to open Start, find Kuakgan, right-click it and choose **Pin to
 taskbar**.
 
-**macOS** (Terminal) makes a small Kuakgan app with the logo:
+**macOS** (Terminal; `PYTHON` is the Python in the command) makes a small
+Kuakgan app with the logo:
 
 ```
 osacompile -o ~/Applications/Kuakgan.app -e 'do shell script "PYTHON /Users/NAME/kuakgan/kuakgan.py dashboard > /dev/null 2>&1 &"'
@@ -277,34 +269,7 @@ gio set "$desk/kuakgan.desktop" metadata::trusted true
 To keep it in the dock or panel, tell the user to open Kuakgan from the
 application menu, right-click its icon and choose **Add to Favorites** or **Pin**.
 
-### 5. Let the agents use it (Agent, after asking the user)
-
-This is what makes Kuakgan useful every day rather than once. Ask the user
-before doing it, since it changes how every future session behaves. Then add
-the block that `kuakgan instructions` prints (it already contains the exact
-command for this computer) to the user's own instructions, so it applies to
-every project: `~/.claude/CLAUDE.md` for Claude Code and/or `~/.codex/AGENTS.md`
-for Codex (only for the tools they use).
-
-For Claude Code you can also, with the user's OK, have the tips arrive by
-themselves at the start of every session: add a `SessionStart` hook to
-`~/.claude/settings.json` (merge it with what is there; do not replace the
-file):
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "<python> <path>/kuakgan.py check --hook" } ] }
-    ]
-  }
-}
-```
-
-Use the same full Python command and path as above. The hook prints a few
-short lines, which Claude Code adds to the session's context.
-
-### 6. Act on what it found (Agent, with the user)
+### 5. Act on what it found (with the user)
 
 Read `kuakgan findings` and look at the biggest ones in the sessions they come
 from. Work out why each happens and what would remove the cause best for this
@@ -312,6 +277,45 @@ user: a change in how you work, a line in a project's `CLAUDE.md` or
 `AGENTS.md`, a setting, a script saved as a file, or a small tool. Kuakgan's
 own fix texts are starting points, not answers. Tell the user what you found,
 what you suggest and what it would save, and make each change they agree to.
+
+### 6. Other computers, if they have any
+
+Some people also run Claude Code or Codex on other computers, such as a second
+laptop or build machines. This computer can include their logs, so the
+dashboard shows all of the user's usage and the tips learn from every machine.
+Find out yourself before asking:
+
+- `kuakgan machines seen` lists the computers this computer's sessions worked
+  on over SSH, with how often;
+- `~/.ssh/config` names the computers the user reaches by name;
+- if [Girdish](https://github.com/Kullevi/girdish) is set up, its machines are
+  the user's build computers.
+
+If none of these shows a computer where the user plausibly runs Claude Code or
+Codex, skip this step without asking. Otherwise ask about the ones you found by
+name ("your sessions also worked on build-pc and the laptop; include the
+Claude and Codex logs there too?"). A server the sessions only deploy to is
+seldom one; say what you are unsure of.
+
+Nothing is installed on the other computers: Kuakgan reads their logs over SSH,
+and only the results travel. Each needs SSH from this computer without a
+password (`ssh -o BatchMode=yes USER@ADDRESS echo ok` must print `ok`; the
+[Girdish README](https://github.com/Kullevi/girdish#setup-for-the-agent-doing-it)
+has the steps to set that up for Linux, macOS and Windows, and any step that
+asks for a password is for the user to run in their own terminal, never in
+chat) and Python 3.9 or newer there. Then add each one:
+
+```
+kuakgan machines add NAME USER@ADDRESS
+```
+
+`NAME` is a short name the user recognises, such as `build-pc`. Instead of
+`USER@ADDRESS` you can give a `Host` alias from `~/.ssh/config`, and `--key`
+and `--port` when needed. The first time, that computer reads all of its own
+logs, which takes as long as step 2 did here. Afterwards the dashboard and every
+command fetch what is new from each machine at most every ten minutes, and
+`kuakgan index` does it at once. A machine that is off is skipped and tried
+again later.
 
 ---
 
@@ -326,9 +330,9 @@ Every command answers in JSON, except `check --hook` and `instructions`.
 | `sessions [--days N] [--project P] [--limit N]` | Recent sessions with their tokens, cost and tool calls. |
 | `check [--dir DIR] [--hook]` | For agents: earlier mistakes in this project and what worked instead, files often re-read, repeated scripts, and the current session. `--hook` gives short plain text. |
 | `instructions` | The block to add to `CLAUDE.md` or `AGENTS.md`, with this computer's command filled in. |
-| `machines [add NAME ADDRESS [--user U] [--key PATH] [--port P] \| remove NAME]` | Other computers whose logs to include, read over SSH. Without arguments, lists them. |
+| `machines [add NAME ADDRESS [--user U] [--key PATH] [--port P] \| remove NAME \| seen]` | Other computers whose logs to include, read over SSH. Without arguments, lists them; `seen` lists computers your sessions used over SSH that are not added yet. |
 | `index [--rebuild]` | Read new and changed logs now, here and on the other machines. Every other command does this by itself. |
-| `dashboard [--background] [--stop] [--port P] [--no-browser]` | The dashboard on `http://127.0.0.1:8766/`. `--background` starts it as a process of its own; `--stop` stops it. |
+| `dashboard [--background] [--stop] [--port P] [--no-browser]` | The dashboard on `http://127.0.0.1:8766/`. `--background` starts it as a process of its own; `--stop` stops it. An older Kuakgan still running there is replaced. |
 
 `--project` takes a project's folder name (as shown in `summary`) or its full
 path. Tokens and cost count the model calls made in the period; sessions, tool
@@ -395,7 +399,8 @@ screenshots show no project, session or machine names, commands or file names.
 - **No sessions found.** Check that `~/.claude/projects` or `~/.codex/sessions`
   exists and holds `.jsonl` files. If Claude Code or Codex keeps its files
   elsewhere, set `CLAUDE_CONFIG_DIR` or `CODEX_HOME` as they do.
-- **Numbers look off after an update.** Run `kuakgan index --rebuild`.
+- **Numbers look off.** Run `kuakgan index --rebuild`, which reads every log
+  again. Sessions whose logs Claude Code has since deleted are then gone.
 - **The dashboard does not open.** Another program may use port 8766; start it
   with `--port 8780`, and give the same `--port` to `--stop`.
 - **Screenshot does nothing.** It needs Edge or Chrome; without them, take a
@@ -403,6 +408,12 @@ screenshots show no project, session or machine names, commands or file names.
 - **The tips do not appear in new sessions.** Run the hook's command yourself;
   if it prints nothing, there is nothing to say yet for that project. Check
   that the Python path in `settings.json` still exists.
+
+## Updating
+
+Run `git pull` in the `kuakgan` folder, then `kuakgan dashboard`: it replaces
+the older Kuakgan that is still running. When a new version counts differently,
+it reads the logs again by itself.
 
 ## Removing Kuakgan
 
