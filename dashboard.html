@@ -222,6 +222,20 @@ function fit() {
   document.documentElement.style.setProperty("--scale", narrow ? 1 : Math.min(innerWidth / 1200, innerHeight / 630));
 }
 
+// The app window opens at the browser's chosen or remembered size; once, make its
+// height match the frame at that width, so there is no empty band.
+if (query.get("app") === "1" && !shotMode) {
+  history.replaceState(null, "", location.pathname);
+  const fitWindow = () => {
+    const want = Math.round(innerWidth * 630 / 1200), extra = outerHeight - innerHeight;
+    const height = Math.min(want + extra, screen.availHeight);
+    if (Math.abs(height - outerHeight) > 2) {
+      try { resizeTo(outerWidth, height); } catch (e) { /* a normal tab cannot be resized */ }
+    }
+  };
+  if (document.readyState === "complete") fitWindow(); else addEventListener("load", fitWindow);
+}
+
 // Shows as many whole items as fit, and says how many more there are.
 // The count goes in the card's head when one is given, so the list keeps its room.
 function fill(box, items, more, countBox, count) {

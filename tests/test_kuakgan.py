@@ -29,7 +29,7 @@ class ClaudeLog:
     """Writes a Claude Code session log the way Claude Code does."""
 
     def __init__(self, session: str, title: str = ""):
-        self.session, self.lines, self.t, self.n = session, [], 0.0, 0
+        self.session, self.lines, self.t, self.n, self.extra = session, [], 0.0, 0, {}
         if title:
             self.lines.append({"type": "custom-title", "customTitle": title, "sessionId": session})
         self.user("Please fix the checkout page")
@@ -45,13 +45,14 @@ class ClaudeLog:
         mid, tid = f"msg_{self.session}_{self.n}", f"toolu_{self.session}_{self.n}"
         usage = {"input_tokens": 10, "output_tokens": 100, "cache_read_input_tokens": 1000,
                  "cache_creation_input_tokens": 200, "cache_creation": {"ephemeral_1h_input_tokens": 200}}
-        # Claude Code writes one line per content block, each repeating the usage.
-        for block in ({"type": "text", "text": "Working on it."},
-                      {"type": "tool_use", "id": tid, "name": name, "input": inp}):
+        # Claude Code writes one line per content block, each repeating the usage; the
+        # first carries a partial output count.
+        for block, out in (({"type": "text", "text": "Working on it."}, 7),
+                           ({"type": "tool_use", "id": tid, "name": name, "input": inp}, 100)):
             self.lines.append({"type": "assistant", "timestamp": ts(self.t), "cwd": PROJECT,
-                               "sessionId": self.session,
+                               "sessionId": self.session, **self.extra,
                                "message": {"id": mid, "model": model, "role": "assistant",
-                                           "content": [block], "usage": usage}})
+                                           "content": [block], "usage": {**usage, "output_tokens": out}}})
         self.t += 1
         self.lines.append({"type": "user", "timestamp": ts(self.t), "cwd": PROJECT, "sessionId": self.session,
                            "message": {"role": "user", "content": [
@@ -224,6 +225,7 @@ class KuakganTest(unittest.TestCase):
         # Prices change: costs are worked out again, from the tokens already counted.
         db = kuakgan.connect()
         before = db.execute("SELECT cost FROM sessions WHERE id = 'codex-1'").fetchone()[0]
+        claude_before = db.execute("SELECT cost FROM sessions WHERE id = 's1'").fetchone()[0]
         db.close()
         prices = TMP / "prices.json"
         prices.write_text(json.dumps({"gpt-6.2-sol": {"input": 4, "output": 20, "cache_read": 0.2}}))
@@ -232,6 +234,9 @@ class KuakganTest(unittest.TestCase):
             db = kuakgan.connect()
             after = db.execute("SELECT cost FROM sessions WHERE id = 'codex-1'").fetchone()[0]
             self.assertAlmostEqual(after, 2 * before, places=9)
+            # One-hour cache writes keep their own price when costs are worked out again.
+            self.assertAlmostEqual(db.execute("SELECT cost FROM sessions WHERE id = 's1'").fetchone()[0],
+                                   claude_before, places=9)
             db.close()
         finally:
             del os.environ["KUAKGAN_PRICES"]
@@ -319,10 +324,6 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(a, b)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ProjectTest(unittest.TestCase):
     """Worktrees and subfolders count as their repository, also once deleted."""
 
@@ -354,3 +355,57 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(got["b"], "shop")    # four in five worktrees beside it are shop's
         self.assertEqual(got["f"], "gone")    # its neighbours are split: no guess
         self.assertEqual(got["d"], "notes")   # beside shop's own folder: says nothing
+
+
+class SubagentTest(unittest.TestCase):
+    """Sub-agents: a fork's copied messages and a Codex sub-agent's repeated meta."""
+
+    @classmethod
+    def setUpClass(cls):
+        folder = TMP / "claude" / "projects" / "C--work-shop" / "s3" / "subagents"
+        folder.mkdir(parents=True, exist_ok=True)
+        fork = ClaudeLog("agent-fork")
+        fork.tool("Bash", {"command": "ls"})            # copied from the agent it was forked from
+        fork.extra = {"attributionAgent": "fork"}
+        fork.tool("Bash", {"command": "git status"})    # its own
+        (folder / "agent-fork.jsonl").write_text("\n".join(json.dumps(x) for x in fork.lines) + "\n")
+        (folder / "agent-fork.meta.json").write_text(json.dumps({"agentType": "fork", "isFork": True}))
+        (folder / "journal.jsonl").write_text(json.dumps({"type": "workflow"}) + "\n")
+        codex = TMP / "codex" / "sessions" / "2026" / "11" / "19"
+        lines = [{"timestamp": ts(10), "type": "session_meta",
+                  "payload": {"id": "codex-child", "parent_thread_id": "codex-1", "cwd": PROJECT}},
+                 {"timestamp": ts(10), "type": "session_meta", "payload": {"id": "codex-1", "cwd": PROJECT}},
+                 {"timestamp": ts(11), "type": "turn_context", "payload": {"model": "gpt-6.2-sol"}},
+                 {"timestamp": ts(12), "type": "event_msg", "payload": {"type": "token_count", "info": {
+                     "total_token_usage": {"total": 1}, "last_token_usage": {"input_tokens": 50, "output_tokens": 5}}}}]
+        (codex / "rollout-2026-11-19T10-05-00-codex-child.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        kuakgan.update_index(quiet=True)
+
+    def test_a_fork_counts_only_its_own_messages(self):
+        db = kuakgan.connect()
+        row = db.execute("SELECT requests, output, calls FROM sessions WHERE id = 's3/agent-fork'").fetchone()
+        self.assertEqual((row["requests"], row["output"], row["calls"]), (1, 100, 1))
+        self.assertIsNone(db.execute("SELECT 1 FROM sessions WHERE id LIKE '%journal%'").fetchone())
+
+    def test_a_codex_subagent_keeps_its_own_id(self):
+        db = kuakgan.connect()
+        child = db.execute("SELECT parent, requests FROM sessions WHERE id = 'codex-child'").fetchone()
+        self.assertEqual((child["parent"], child["requests"]), ("codex-1", 1))
+        self.assertEqual(db.execute("SELECT requests FROM sessions WHERE id = 'codex-1'").fetchone()[0], 6)
+
+    def test_check_names_the_folder_never_a_parent_and_only_the_hooks_session(self):
+        inner = Path(PROJECT) / "new-thing"
+        inner.mkdir(parents=True, exist_ok=True)
+        self.assertEqual(kuakgan.check(str(inner))["project"], "new-thing")
+        self.assertIsNone(kuakgan.check(PROJECT, session_id="a-new-session")["this_session"])
+
+    def test_ssh_hosts(self):
+        host = kuakgan.ssh_host
+        self.assertEqual(host("ssh -i ~/.ssh/k -p 22 me@10.0.0.5 'tail x.log'"), "me@10.0.0.5")
+        self.assertEqual(host("cd /x && ssh -nT -o BatchMode=yes build-pc ls"), "build-pc")
+        self.assertIsNone(host("git log"))
+
+
+if __name__ == "__main__":
+    unittest.main()
