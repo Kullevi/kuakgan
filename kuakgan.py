@@ -1429,19 +1429,17 @@ def check(directory: str = ".") -> dict:
                "reread_calls": (f.get("rereads") or {}).get("calls", 0),
                "polling_now": polling_now}
         if polling_now:
-            tips.append("Your last few steps only checked on running work. Wait for it instead: one "
-                        "`sleep 60` then a single check, or a background run with a notification.")
+            tips.append("Your last four steps only checked on work that is still running.")
         if now["reread_calls"] >= 3:
-            tips.append("You have read the same unchanged files several times this session; work from "
-                        "what you already read.")
+            tips.append(f"This session has read unchanged files again {now['reread_calls']} times.")
         if (current["last_context"] or 0) > 400_000:
-            tips.append("This session's context is very large; consider finishing the current step and "
-                        "handing over to a fresh session with a short summary.")
+            tips.append(f"This session's context is {current['last_context'] // 1000}k tokens, and every "
+                        "model call pays for all of it.")
     for p in pitfalls[:4]:
         tips.append(pitfall_tip(p))
     if scripts:
         tips.append(f"An inline {scripts[0]['language']} script starting `{scripts[0]['start'][:60]}` "
-                    f"has been written {scripts[0]['times']} times here; save it as a file and reuse it.")
+                    f"has been written {scripts[0]['times']} times here.")
     db.close()
     return {"project": project, "sessions_seen": len(ids), "tips": tips,
             "pitfalls": pitfalls,
@@ -1461,7 +1459,8 @@ def pitfall_tip(p: dict) -> str:
 
 def check_text(answer: dict) -> str:
     """The short plain-text form, for a SessionStart hook."""
-    lines = [f"Kuakgan, project {answer['project']}:"]
+    lines = [f"Kuakgan, project {answer['project']}: what the logs show. Judge which of these matter "
+             "and solve them as best fits; ask the user before a lasting change to their setup."]
     lines += [f"- {t}" for t in answer["tips"]] or ["- No earlier mistakes recorded here."]
     for p in answer["pitfalls"][4:6]:
         lines.append("- " + pitfall_tip(p))
@@ -1487,9 +1486,13 @@ task, and before waiting on a long-running command, run:
 
     {cmd} check
 
-It lists commands that failed before in this project and what worked instead,
-files earlier sessions kept re-reading, and how this session is doing. Follow
-its tips; mention one to the user only if it changes what you do."""
+It shows where work in this project went wasted: commands that failed before
+and what worked instead, files sessions kept re-reading, scripts written again
+and again, and how this session is doing. These are observations, not rules.
+Judge which ones matter and why they happen, then solve them the best way: change
+how you work now, and when a lasting change would help (a line in the project's
+instructions, a saved script, a setting, a small tool) propose it to the user
+with what it would save, and make it once they agree."""
 
 
 # ---------- dashboard ----------

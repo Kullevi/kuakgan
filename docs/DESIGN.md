@@ -39,8 +39,10 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    counts, without reading the logs. Models
    without a price count tokens but no cost, and the totals say how many
    tokens that leaves out.
-7. **Agents get short answers.** `check` is meant to go into a model's
-   context, so it returns a handful of tips and lists, not raw data. Its
+7. **Agents get observations and judge them.** `check` is meant to go into a
+   model's context, so it returns a handful of short observations and lists, not
+   raw data and not rules. The agent decides what matters and how to solve it,
+   and asks the user before a lasting change. Its
    "current session" is the session in that project that was written to most
    recently, within the last half hour.
 8. **A project is a repository.** A session belongs to the Git repository of its

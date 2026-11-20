@@ -6,11 +6,13 @@ shows tokens and estimated cost over time per model, project and session. It
 also finds the patterns that burn tokens without getting work done: polling a
 log again and again, reading the same file over and over, rewriting the same
 helper script, and repeating a command that failed last week too. Each one
-comes with a concrete fix.
+comes with a suggested fix.
 
-It also helps the agents themselves. `kuakgan check` tells an agent, at the
-start of a task, which commands failed in this project before and what worked
-instead, so it gets them right the first time.
+It also tells the agents themselves. `kuakgan check` shows an agent what went
+wasted in its project: commands that failed before and what worked instead,
+files read again and again, scripts written over and over, and how its own
+session is going. The agent judges what matters and solves it: it changes how it
+works, and proposes lasting changes to you.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
@@ -291,16 +293,12 @@ short lines, which Claude Code adds to the session's context.
 
 ### 6. Act on what it found (Agent, with the user)
 
-Go through the biggest findings from `kuakgan findings` with the user and offer
-to apply the fixes that are theirs to make, one at a time, for example:
-
-- **Busy polling in Codex:** add `background_terminal_max_timeout = 3600000` to
-  `~/.codex/config.toml`, so Codex waits for long commands instead of handing
-  back to the model every ten seconds.
-- **Repeated scripts:** save the script that recurs as a file in the project
-  and mention it in the project's `CLAUDE.md` or `AGENTS.md`.
-- **Repeated failures:** add a line about the right command to the project's
-  `CLAUDE.md` or `AGENTS.md`.
+Read `kuakgan findings` and look at the biggest ones in the sessions they come
+from. Work out why each happens and what would remove the cause best for this
+user: a change in how you work, a line in a project's `CLAUDE.md` or
+`AGENTS.md`, a setting, a script saved as a file, or a small tool. Kuakgan's
+own fix texts are starting points, not answers. Tell the user what you found,
+what you suggest and what it would save, and make each change they agree to.
 
 ---
 
