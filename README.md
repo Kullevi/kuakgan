@@ -1,6 +1,6 @@
 # <img src="logo.svg" width="40" align="top" alt=""> Kuakgan
 
-Kuakgan shows where your Claude Code and Codex tokens go, and what your agents
+Kuakgan shows where your Claude Code, Codex and Antigravity tokens go, and what your agents
 waste. It reads the session logs both tools already keep on your computer, and
 shows tokens and estimated cost over time per model, project and session. It
 also finds the patterns that burn tokens without getting work done: polling a
@@ -139,8 +139,10 @@ says how many tokens the dollar figure leaves out.
 
 Kuakgan finds the logs in `~/.claude/projects`, `~/.codex/sessions` and
 `~/.codex/archived_sessions` (or under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
-when those are set). If a folder is missing, that tool has simply not been
-used on this computer. Kuakgan looks back at most 30 days: Claude Code deletes
+when those are set), and the Antigravity CLI's (`agy`) in
+`~/.gemini/antigravity-cli`. If a folder is missing, that tool has simply not
+been used on this computer. The Antigravity desktop app keeps no token counts,
+so only the CLI is read. Kuakgan looks back at most 30 days: Claude Code deletes
 conversations older than that by default.
 
 ### 3. Show the user
@@ -282,7 +284,7 @@ what you suggest and what it would save, and make each change they agree to.
 
 ### 6. Other computers, if they have any
 
-Some people also run Claude Code or Codex on other computers, such as a second
+Some people also run Claude Code, Codex or Antigravity on other computers, such as a second
 laptop or build machines. This computer can include their logs, so the
 dashboard shows all of the user's usage and the tips learn from every machine.
 Find out yourself before asking:
@@ -372,12 +374,12 @@ all costs are worked out again from the counted tokens.
 
 ## Add another tool
 
-Kuakgan reads Claude Code and Codex, because those are the tools we use and
-can test. Others, such as Gemini CLI, Antigravity, Grok or Cursor, are welcome
+Kuakgan reads Claude Code, Codex and the Antigravity CLI, because those are the
+tools we use and can test. Others, such as Gemini CLI, Grok or Cursor, are welcome
 as pull requests. Reading a tool takes three things in `kuakgan.py`:
 
 1. **Where its logs are:** a few lines in `log_files()`, with a `source` name.
-2. **A reader:** a function like `parse_claude()` or `parse_codex()` that turns
+2. **A reader:** a function like `parse_claude()`, `parse_codex()` or `parse_agy()` that turns
    one log file into sessions: usage per model call (`add_usage`) and tool
    calls (`make_call`). Everything after that, from findings to the dashboard,
    works unchanged. Add the source to `parse_file()`.

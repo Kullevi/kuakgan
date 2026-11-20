@@ -124,7 +124,7 @@ body.narrow { overflow: auto; }
 </style>
 </head>
 <body>
-<div class="loading" id="loading"><div>Reading your Claude Code and Codex logs…<br><span style="font-size:12px">The first time can take a few minutes; after that it is quick.</span></div></div>
+<div class="loading" id="loading"><div>Reading your AI coding logs…<br><span style="font-size:12px">The first time can take a few minutes; after that it is quick.</span></div></div>
 <main class="frame">
   <header>
     <div class="brand"><img src="/logo.svg" alt=""><h1>Kuakgan</h1></div>
@@ -223,10 +223,23 @@ const md = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
 const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : many}`;
 const plain = (s) => String(s || "").replace(/[`*#>_]+/g, "").replace(/\s+/g, " ").trim();
 
-// Model ids as people say them: claude-opus-5-5 is Opus 5.5, gpt-6.2-sol is GPT-6.2 Sol.
+// The tools the logs in this view come from, as people name them.
+function tools() {
+  const named = { claude: "Claude Code", codex: "Codex", agy: "Antigravity" };
+  const seen = [...new Set(state.data.models.map((m) => named[m.source] || m.source))];
+  const list = seen.length ? seen : ["Claude Code", "Codex"];
+  return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0];
+}
+
+// Model ids as people say them: claude-opus-5-5 is Opus 5.5, gpt-6.2-sol is GPT-6.2 Sol,
+// gemini-4-argon-medium is Gemini 4 Argon (medium), the last word being agy's thinking level.
 function modelName(id) {
   const title = (w) => w.charAt(0).toUpperCase() + w.slice(1);
   let m = String(id || "").replace(/-\d{8}$/, "");
+  if (/^gemini-/.test(m)) {
+    const words = m.split("-"), level = /^(minimal|low|medium|high)$/.test(words[words.length - 1]) ? words.pop() : "";
+    return words.map(title).join(" ") + (level ? ` (${level})` : "");
+  }
   if (/^gpt-/i.test(m)) {
     const [, version, ...rest] = m.split("-");
     return ["GPT-" + version, ...rest.map(title)].join(" ");
@@ -340,10 +353,10 @@ function render() {
   const days = d.period_days;
   const when = days === 1 ? "Last 24 hours" : `Last ${days} days`;
   const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-  $("scope").textContent = [shotMode ? "Claude Code and Codex" : "", when,
+  $("scope").textContent = [shotMode ? tools() : "", when,
     state.project ? nm.project(state.project) : "All projects", shotMode ? date : ""].filter(Boolean).join(" · ");
   $("headline").textContent = money(t.cost);
-  $("subline").textContent = !t.tokens ? "No Claude Code or Codex sessions in this period yet."
+  $("subline").textContent = !t.tokens ? "No Claude Code, Codex or Antigravity sessions in this period yet."
     : `${words(t.tokens)} tokens. On a subscription you pay a flat fee instead.`
       + (t.tokens_without_price ? ` ${words(t.tokens_without_price)} have no known price.` : "");
   const stat = (v, k, cls = "") => `<div class="stat ${cls}"><b class="num">${v}</b><span>${k}</span></div>`;
@@ -442,7 +455,7 @@ function renderChart() {
 // What an agent needs to look into one finding and suggest the best fix itself.
 function askAgent(f) {
   const days = state.data.period_days, fix = Object.values(f.fix || {})[0] || "";
-  return `Kuakgan (which reads my Claude Code and Codex logs) found this in the last ${days === 1 ? "24 hours" : days + " days"}`
+  return `Kuakgan (which reads my ${tools()} logs) found this in the last ${days === 1 ? "24 hours" : days + " days"}`
     + `${state.project ? ` in project ${state.project}` : ""}: ${f.title}. ${f.what} `
     + `It happened ${f.calls.toLocaleString("en-US")} times in ${f.sessions.toLocaleString("en-US")} sessions`
     + `${f.cost ? ` and cost about ${money(f.cost)}` : ""}. Kuakgan's own suggestion: ${fix} `

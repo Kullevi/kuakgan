@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Kuakgan: see where your Claude Code and Codex tokens go, and what your agents waste.
+"""Kuakgan: see where your Claude Code, Codex and Antigravity tokens go, and what your agents waste.
 
-Reads the session logs Claude Code and Codex already write on this computer, keeps
+Reads the session logs Claude Code, Codex and the Antigravity CLI already write on this computer, keeps
 a small local index of them, and answers as JSON: tokens and estimated cost over
 time per model, project and session; waste patterns such as busy polling, files
 read again and again, the same helper script rewritten, and commands that keep
@@ -40,7 +40,7 @@ HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd(
 DB_PATH = Path(os.environ.get("KUAKGAN_DB", HERE / ".kuakgan.db"))
 MACHINES_PATH = Path(os.environ.get("KUAKGAN_MACHINES", HERE / "kuakgan.json"))
 PULL_EVERY = 600  # seconds between fetching from other machines, except for `index`
-INDEX_VERSION = 11  # bump when parsing changes; the index is then rebuilt
+INDEX_VERSION = 12  # bump when parsing changes; the index is then rebuilt
 
 
 def claude_root() -> Path:
@@ -54,13 +54,19 @@ def codex_roots() -> list[Path]:
     return [base / "sessions", base / "archived_sessions"]
 
 
+def agy_root() -> Path:
+    """The Antigravity CLI's folder (its desktop app keeps .gemini/antigravity, with no tokens)."""
+    base = os.environ.get("KUAKGAN_AGY_DIR")
+    return Path(base) if base else Path.home() / ".gemini" / "antigravity-cli"
+
+
 ABOUT = ("Kuakgan is open source, built by the team behind Kullevi "
          "(https://kullevi.com), which builds AI that runs your company for you.")
 
 # ---------- prices ----------
 
 # Dollars per million tokens: input, output, cache write (5 minutes), cache write
-# (1 hour), cache read, at Anthropic's and OpenAI's list prices; the longest matching
+# (1 hour), cache read, at Anthropic's, OpenAI's and Google's list prices; the longest matching
 # prefix wins. Models without a price count tokens but no cost.
 # Add or override prices in prices.json next to this file (see README).
 PRICES = {
@@ -88,6 +94,9 @@ PRICES = {
     "gpt-5-mini": (0.25, 2, 0.25, 0.25, 0.025), "gpt-5-nano": (0.05, 0.40, 0.05, 0.05, 0.005),
     "gpt-5.3-codex": (1.75, 14, 1.75, 1.75, 0.175), "gpt-5-codex": (1.25, 10, 1.25, 1.25, 0.125),
     "gpt-5": (1.25, 10, 1.25, 1.25, 0.125),
+    # Google, at its list prices. A price that changes is a list of periods, each
+    # from the day it starts (UTC); Gemini has no separate cache-write price.
+    "gemini-4-argon": [("2026-10-13", (2, 10, 2, 2, 0.10)), ("2026-12-01", (4, 20, 4, 4, 0.20))],
 }
 
 
@@ -104,19 +113,37 @@ def load_prices() -> dict:
     return dict(sorted(prices.items(), key=lambda kv: -len(kv[0])))
 
 
-def price_for(model: str, prices: dict):
+def price_for(model: str, prices: dict, hour: str | None = None):
     """The price of the longest name in the table that `model` is or starts with, as a
     whole part: gpt-5 prices gpt-5-mini-2025 but not gpt-5.7. A provider prefix such as
-    `anthropic/` and dots in Claude versions (claude-opus-5.5) are ignored."""
+    `anthropic/` and dots in Claude versions (claude-opus-5.5) are ignored. For a price
+    that changed, the one in force at `hour` (the latest without one)."""
     model = (model or "").lower().rsplit("/", 1)[-1]
     if model.startswith("claude-"):
         model = model.replace(".", "-")
-    return next((p for name, p in prices.items() if model == name or model.startswith(name + "-")), None)
+    p = next((p for name, p in prices.items() if model == name or model.startswith(name + "-")), None)
+    if p and isinstance(p[0], (list, tuple)):  # periods: [(from_day, price), ...]
+        day = (hour or "9999")[:10]
+        p = next((price for start, price in reversed(p) if start <= day), p[0][1])
+    return p
 
 
-def cost_of(model: str, u: dict, prices: dict):
+def price_periods(model: str, prices: dict) -> list[tuple[str, str, tuple | None]]:
+    """(from_hour, until_hour, price) for each period of a model's price."""
+    model = (model or "").lower().rsplit("/", 1)[-1]
+    if model.startswith("claude-"):
+        model = model.replace(".", "-")
+    p = next((p for name, p in prices.items() if model == name or model.startswith(name + "-")), None)
+    if not p or not isinstance(p[0], (list, tuple)):
+        return [("", "9999", p)]
+    starts = [""] + [start for start, _ in p[1:]]
+    ends = [start for start, _ in p[1:]] + ["9999"]
+    return [(a, b, price) for a, b, (_, price) in zip(starts, ends, p)]
+
+
+def cost_of(model: str, u: dict, prices: dict, hour: str | None = None):
     """Estimated dollars for one model call's usage, or None without a price."""
-    p = price_for(model, prices)
+    p = price_for(model, prices, hour)
     if p is None:
         return None
     return (u["input"] * p[0] + u["output"] * p[1] + u["cache_write"] * p[2]
@@ -284,8 +311,9 @@ def hour_of(ts: float) -> str:
 
 
 def add_usage(s: dict, ts, model: str, u: dict, prices: dict) -> float:
-    cost = cost_of(model, u, prices)
-    row = s["usage"][(hour_of(ts or s["last_ts"] or 0), model or "unknown")]
+    hour = hour_of(ts or s["last_ts"] or 0)
+    cost = cost_of(model, u, prices, hour)
+    row = s["usage"][(hour, model or "unknown")]
     row[0] += u["input"]; row[1] += u["cache_read"]; row[2] += u["cache_write"] + u.get("cache_write_1h", 0)
     row[3] += u["output"]; row[4] += 1; row[6] += u.get("cache_write_1h", 0)
     if cost is None:
@@ -550,10 +578,95 @@ def parse_codex(path: str, prices: dict) -> list[dict]:
     return [s]
 
 
+# ---------- parsing Antigravity CLI logs ----------
+
+# agy's tools, as the ones make_call already knows.
+AGY_TOOLS = {"read_file": ("Read", "Path"), "view_file": ("Read", "Path"), "edit_file": ("Edit", "Path"),
+             "write_file": ("Edit", "Path"), "replace_file_content": ("Edit", "TargetFile"),
+             "run_command": ("Bash", "CommandLine"), "command_status": ("TaskOutput", "CommandId"),
+             "grep_search": ("Grep", ""), "find_by_name": ("Glob", ""), "list_dir": ("LS", "")}
+AGY_EXIT_RE = re.compile(r"Command exited with code (-?\d+)")
+
+
+def agy_conversation(path: Path) -> dict:
+    """Title, folder and parent of an agy conversation, from agy's own summary index."""
+    db_path = path.parents[4] / "conversation_summaries.db"  # <root>/brain/<id>/.system_generated/logs/
+    with contextlib.suppress(sqlite3.Error, OSError, ValueError):
+        db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=2)
+        row = db.execute("SELECT title, workspace_uris, parent_conversation_id FROM conversation_summaries "
+                         "WHERE conversation_id = ?", (path.parents[2].name,)).fetchone()
+        db.close()
+        if row:
+            uris = json.loads(row[1] or "[]")
+            folder = uris[0] if uris else ""
+            if folder.startswith("file://"):
+                from urllib.parse import unquote
+                folder = unquote(folder[7:])
+                if re.match(r"/[A-Za-z]:", folder):  # file:///C:/... on Windows
+                    folder = folder[1:]
+            return {"title": row[0] or "", "cwd": folder, "parent": row[2] or None}
+    return {}
+
+
+def parse_agy(path: str, prices: dict) -> list[dict]:
+    """The Antigravity CLI (agy) writes one line per step: the model's turns with their
+    model and tokens and the tool calls they make, then one step per tool result."""
+    p = Path(path)
+    s = new_session(p.parents[2].name, "agy", path)
+    info = agy_conversation(p)
+    s["cwd"], s["title"], s["parent"] = info.get("cwd", ""), info.get("title", ""), info.get("parent")
+    s["client"] = "agy"
+    waiting = []  # tool calls of the last model turn, in order, until their results come
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(o, dict):
+                continue
+            ts = parse_ts(o.get("created_at"))
+            touch(s, ts)
+            kind = o.get("type")
+            if kind == "USER_INPUT" and o.get("source") == "USER_EXPLICIT":
+                s["user_msgs"] += 1
+                text = re.sub(r"</?USER_REQUEST>", "", str(o.get("content") or "")).strip()
+                s["first_prompt"] = s["first_prompt"] or text[:120]
+            elif kind == "PLANNER_RESPONSE" and o.get("model"):
+                total_in = int(o.get("input_tokens") or 0)
+                cached = int(o.get("cache_read_tokens") or 0)
+                u = {"input": max(total_in - cached, 0), "output": int(o.get("output_tokens") or 0),
+                     "cache_read": cached, "cache_write": 0}
+                cost = add_usage(s, ts, o["model"], u, prices)
+                calls = []
+                for t in o.get("tool_calls") or []:
+                    if not isinstance(t, dict):
+                        continue
+                    tool, key = AGY_TOOLS.get(t.get("name"), (t.get("name") or "", ""))
+                    args = t.get("args") if isinstance(t.get("args"), dict) else {}
+                    inp = {"file_path": args.get(key), "command": args.get(key)} if key else {}
+                    calls.append(make_call(s, ts, tool, {k: v for k, v in inp.items() if v}))
+                for c in calls:
+                    c["turn_cost"], c["turn_tok"] = cost / len(calls), sum(u.values()) // len(calls)
+                waiting = calls
+            elif kind == "GENERIC" and o.get("source") == "MODEL" and waiting and o.get("status") in ("DONE", "ERROR"):
+                call = waiting.pop(0)
+                # Drop agy's own "Created At / Completed At" lines; they say nothing about the result.
+                out = re.sub(r"(?m)^(Created|Completed) At:.*\n?", "", str(o.get("content") or ""))
+                call["out_tok"] = len(out) // 4
+                code = AGY_EXIT_RE.search(out)
+                if o.get("status") == "ERROR" or (code and code.group(1) != "0"):
+                    call["err"] = 1
+                    call["err_text"] = (o.get("error") or error_line(out.split("Command output:", 1)[-1]))[:200]
+                if ts and call["ts"]:
+                    call["dur"] = int((ts - call["ts"]) * 1000)
+    return [s]
+
+
 def parse_file(job: tuple[str, str, dict]) -> tuple[str, list[dict] | str]:
     path, source, prices = job
     try:
-        sessions = (parse_claude if source == "claude" else parse_codex)(path, prices)
+        sessions = {"claude": parse_claude, "codex": parse_codex, "agy": parse_agy}[source](path, prices)
         for s in sessions:
             s["repo"] = repo_of(s["cwd"])  # read here, on the machine whose folders these are
             s["findings"] = session_findings(s)
@@ -741,13 +854,13 @@ def reprice(db: sqlite3.Connection, prices: dict) -> None:
     without reading the logs again (some may be gone). cache_write includes the
     one-hour writes, which are also kept apart for their own price."""
     for model, in db.execute("SELECT DISTINCT model FROM usage").fetchall():
-        p = price_for(model, prices)
-        if p is None:
-            db.execute("UPDATE usage SET cost = 0 WHERE model = ?", (model,))
-        else:
-            db.execute("UPDATE usage SET cost = (input * ? + output * ? + (cache_write - cache_write_1h) * ? "
-                       "+ cache_write_1h * ? + cache_read * ?) / 1e6 WHERE model = ?",
-                       (p[0], p[1], p[2], p[3], p[4], model))
+        for start, end, p in price_periods(model, prices):
+            if p is None:
+                db.execute("UPDATE usage SET cost = 0 WHERE model = ?", (model,))
+            else:
+                db.execute("UPDATE usage SET cost = (input * ? + output * ? + (cache_write - cache_write_1h) * ? "
+                           "+ cache_write_1h * ? + cache_read * ?) / 1e6 WHERE model = ? AND hour >= ? AND hour < ?",
+                           (p[0], p[1], p[2], p[3], p[4], model, start, end))
     old = {r[0]: r[1] or 0 for r in db.execute("SELECT id, cost FROM sessions")}
     db.execute("UPDATE sessions SET cost = (SELECT COALESCE(SUM(cost), 0) FROM usage WHERE session = sessions.id)")
     unpriced = defaultdict(int)
@@ -789,6 +902,13 @@ def log_files() -> dict[str, tuple[str, int, float]]:
                 with contextlib.suppress(OSError):
                     st = p.stat()
                     found[str(p)] = ("codex", st.st_size, st.st_mtime)
+    # The Antigravity CLI; its desktop app keeps no tokens, so only the CLI is read.
+    brain = agy_root() / "brain"
+    if brain.is_dir():
+        for p in brain.glob("*/.system_generated/logs/transcript_full.jsonl"):
+            with contextlib.suppress(OSError):
+                st = p.stat()
+                found[str(p)] = ("agy", st.st_size, st.st_mtime)
     return found
 
 
@@ -1642,7 +1762,7 @@ def list_sessions(days=7, project=None, limit=30) -> list[dict]:
 
 INSTRUCTIONS = """## Kuakgan
 
-Kuakgan reads this computer's Claude Code and Codex logs. At the start of each
+Kuakgan reads this computer's Claude Code, Codex and Antigravity logs. At the start of each
 task, and before waiting on a long-running command, run:
 
     {cmd} check

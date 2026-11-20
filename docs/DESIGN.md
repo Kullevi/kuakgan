@@ -2,7 +2,7 @@
 
 The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
 
-1. **The logs are the source.** Claude Code and Codex already write every
+1. **The logs are the source.** Claude Code, Codex and the Antigravity CLI already write every
    model call and tool call, with token usage, to JSONL files. Kuakgan reads
    those and nothing else: no proxy, no hook that must run during work, no
    provider API. Nothing has to be set up before there is data.
@@ -24,10 +24,13 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    those messages count for the agent that made them. A Codex sub-agent's log
    repeats its parent's `session_meta` after its own; the first one names it.
    Codex repeats a `token_count` event; one whose running total has not changed
-   is skipped. Codex reports cached input inside input tokens; Kuakgan counts
-   it as cache read only. A tool call carries the cost of the model call that
-   made it, shared between the calls in that response. That is the cost of a
-   wasted step.
+   is skipped. Codex and the Antigravity CLI report cached input inside input
+   tokens; Kuakgan counts it as cache read only. The Antigravity CLI's log has
+   one line per step: model turns with their model, tokens and tool calls, then
+   each result; its desktop app records no tokens and is not read. A price that
+   changed (Gemini 4 Argon on 1 December 2026) applies by the hour of each call.
+   A tool call carries the cost of the model call that made it, shared between
+   the calls in that response. That is the cost of a wasted step.
 4. **Commands are classified by their shape, not their meaning.** A shell
    command is a `script` (an inline program with a body), `read` (showing one
    whole file), `observe` (only looking), `wait` (a loop or long sleep) or

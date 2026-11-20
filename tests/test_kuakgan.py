@@ -14,6 +14,7 @@ TMP = Path(tempfile.mkdtemp(prefix="kuakgan-test-"))
 os.environ["KUAKGAN_DB"] = str(TMP / "index.db")
 os.environ["KUAKGAN_CLAUDE_DIR"] = str(TMP / "claude")
 os.environ["KUAKGAN_CODEX_DIR"] = str(TMP / "codex")
+os.environ["KUAKGAN_AGY_DIR"] = str(TMP / "agy")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 kuakgan = importlib.import_module("kuakgan")
 
@@ -405,6 +406,68 @@ class SubagentTest(unittest.TestCase):
         self.assertEqual(host("ssh -i ~/.ssh/k -p 22 me@10.0.0.5 'tail x.log'"), "me@10.0.0.5")
         self.assertEqual(host("cd /x && ssh -nT -o BatchMode=yes build-pc ls"), "build-pc")
         self.assertIsNone(host("git log"))
+
+
+class AntigravityTest(unittest.TestCase):
+    """An Antigravity CLI log, in the format agy writes, with its summary index."""
+
+    @classmethod
+    def setUpClass(cls):
+        import sqlite3
+        root = TMP / "agy"
+        logs = root / "brain" / "agy-1" / ".system_generated" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        model = {"source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-4-argon-medium"}
+        steps = [
+            {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+             "created_at": ts(100), "content": "<USER_REQUEST>\nAdd shell completion\n</USER_REQUEST>"},
+            {**model, "step_index": 1, "created_at": ts(101), "input_tokens": "1000", "cache_read_tokens": "0",
+             "output_tokens": "100", "tool_calls": [
+                 {"name": "read_file", "args": {"Path": f"{PROJECT}/src/cart.ts"}},
+                 {"name": "run_command", "args": {"CommandLine": "pytest -q", "WaitMsBeforeAsync": 5000}}]},
+            {"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "ERROR", "created_at": ts(102),
+             "error": "file does not exist", "content": "Encountered error in step execution: file does not exist"},
+            {"step_index": 3, "source": "MODEL", "type": "GENERIC", "status": "DONE", "created_at": ts(104),
+             "content": "Command exited with code 1.\n\nCommand output:\nE   AssertionError: bad total\n"},
+            {**model, "step_index": 4, "created_at": ts(105), "input_tokens": "1500", "cache_read_tokens": "1000",
+             "output_tokens": "50"},
+        ]
+        (logs / "transcript_full.jsonl").write_text("\n".join(json.dumps(x) for x in steps) + "\n")
+        db = sqlite3.connect(root / "conversation_summaries.db")
+        db.execute("CREATE TABLE conversation_summaries (conversation_id text, title text, workspace_uris text, "
+                   "parent_conversation_id text)")
+        db.execute("INSERT INTO conversation_summaries VALUES ('agy-1', 'Shell completion', ?, '')",
+                   (json.dumps([Path(PROJECT).as_uri()]),))
+        db.commit()
+        db.close()
+        kuakgan.update_index(quiet=True)
+
+    @classmethod
+    def tearDownClass(cls):  # the other tests count only Claude Code and Codex sessions
+        import shutil
+        shutil.rmtree(TMP / "agy")
+        db = kuakgan.connect()
+        db.execute("DELETE FROM sessions WHERE id = 'agy-1'")
+        for table in ("usage", "calls", "findings"):
+            db.execute(f"DELETE FROM {table} WHERE session = 'agy-1'")
+        db.execute("DELETE FROM files WHERE source = 'agy'")
+        db.commit()
+        db.close()
+
+    def test_tokens_cost_and_calls(self):
+        db = kuakgan.connect()
+        row = db.execute("SELECT * FROM sessions WHERE id = 'agy-1'").fetchone()
+        self.assertEqual((row["source"], row["project"], row["title"]), ("agy", "shop", "Shell completion"))
+        # Input tokens include the cached ones; only the rest counts as input.
+        self.assertEqual((row["input"], row["cache_read"], row["output"], row["requests"]), (1500, 1000, 150, 2))
+        self.assertEqual((row["calls"], row["errors"]), (2, 2))
+        # Gemini 4 Argon until December: $2 input, $10 output, $0.10 cached.
+        self.assertAlmostEqual(row["cost"], (1500 * 2 + 150 * 10 + 1000 * 0.10) / 1e6, places=9)
+
+    def test_a_price_that_changes_on_a_date(self):
+        prices = kuakgan.load_prices()
+        self.assertEqual(kuakgan.price_for("gemini-4-argon-high", prices, "2026-11-30T23")[0], 2)
+        self.assertEqual(kuakgan.price_for("gemini-4-argon-high", prices, "2026-12-01T00")[0], 4)
 
 
 if __name__ == "__main__":
