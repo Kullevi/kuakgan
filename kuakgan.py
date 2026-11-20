@@ -1166,7 +1166,8 @@ def ssh_hosts_seen(days: float = 30) -> list[dict]:
     seen = defaultdict(lambda: {"commands": 0, "sessions": set(), "last": 0.0})
     for r in rows:
         host = ssh_host(r["text"] or "")
-        if host and host not in added and host.split("@")[-1] not in added:
+        local = host and host.split("@")[-1].strip("[]").lower() in ("127.0.0.1", "localhost", "::1")
+        if host and not local and host not in added and host.split("@")[-1] not in added:
             h = seen[host]
             h["commands"] += 1
             h["sessions"].add(r["session"])
@@ -1438,7 +1439,7 @@ def summary(days=30, project=None, sessions_limit=10, tz=0) -> dict:
     wasted_calls = sum(f["calls"] for f in findings if f["kind"] != "big_outputs")
     waste_cost = sum(f["cost"] or 0 for f in findings if f["kind"] != "big_outputs")
     return {
-        "period_days": days, "project": project,
+        "period_days": int(days) if float(days).is_integer() else days, "project": project,
         "totals": {"sessions": t["sessions"],
                    "projects": project_count, "tokens": tokens, "input": sums["input"],
                    "cache_read": sums["cache_read"], "cache_write": sums["cache_write"],
@@ -1495,6 +1496,22 @@ def session_row(r) -> dict:
     for k in ("file", "input", "cache_read", "cache_write", "output", "unpriced"):
         d.pop(k, None)
     return d
+
+
+def resolve_project(db, given: str) -> tuple[str | None, list[str]]:
+    """The project a --project value means: a project name, or any folder (in any
+    slash style or case) that sessions worked in or that lies in a repository."""
+    known = [r[0] for r in db.execute("SELECT project FROM sessions GROUP BY project ORDER BY SUM(cost) DESC")]
+    if given in known:
+        return given, known
+    lower = {p.lower(): p for p in known}
+    if given.lower() in lower:
+        return lower[given.lower()], known
+    path = norm_path(given).lower()
+    row = db.execute("SELECT project FROM sessions WHERE lower(replace(cwd, '\\', '/')) = ? "
+                     "ORDER BY last_ts DESC LIMIT 1", (path,)).fetchone()
+    project = row[0] if row else repo_of(given) or lower.get(path.rsplit("/", 1)[-1])
+    return (project if project in known else None), known[:30]
 
 
 def find_project_sessions(db, directory: str) -> tuple[str, list]:
@@ -1961,6 +1978,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("summary", "findings", "sessions"):
         update_index(pull=None)
         days = period(args.days)
+        if args.project:
+            db = connect()
+            found, known = resolve_project(db, args.project)
+            db.close()
+            if not found:
+                out({"error": f"No project called {args.project}.", "projects": known})
+                return 1
+            args.project = found
         if args.command == "summary":
             answer = summary(days, args.project)
             out({**(answer if args.full else brief(answer)), "about": ABOUT})

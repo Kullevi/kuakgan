@@ -87,9 +87,10 @@ user about it in a sentence or two and why. Set it up only if they ask.
 ## Setup (for the agent doing it)
 
 You are setting this up for a user who may have little experience with
-terminals. Do every step yourself. Ask the user only to say yes to installing
-something that is missing, and one question in step 4, after they have seen
-their dashboard.
+terminals. Do every step yourself. The user only says yes to installing
+something that is missing, answers one message in step 4 after they have seen
+their dashboard, agrees to each change you suggest in step 5, and, only if you
+find other computers in step 6, says which to include.
 
 ### 1. Python, Git and the files
 
@@ -120,9 +121,10 @@ git clone https://github.com/Kullevi/kuakgan.git ~/kuakgan
 
 On Windows, give the full path instead of `~/kuakgan`, such as
 `C:/Users/NAME/kuakgan`. Then run `<python> <home>/kuakgan/kuakgan.py instructions`
-with the Python that worked: the block it prints ends with the exact command
-that runs Kuakgan on this computer, with full paths. Below, `kuakgan` stands for
-that command; use it whole in every step, so all of them use the same Python.
+with the Python that worked. The block it prints shows the exact command that
+runs Kuakgan on this computer, with full paths, followed by `check`. Below,
+`kuakgan` stands for that command without `check`; use it whole in every step,
+so all of them use the same Python.
 
 ### 2. Read the logs once
 
@@ -288,11 +290,13 @@ Find out yourself before asking:
 - `kuakgan machines seen` lists the computers this computer's sessions worked
   on over SSH, with how often;
 - `~/.ssh/config` names the computers the user reaches by name;
-- if [Girdish](https://github.com/Kullevi/girdish) is set up, its machines are
-  the user's build computers.
+- for each one that may matter, `ssh -o BatchMode=yes HOST "ls -d ~/.claude/projects ~/.codex/sessions"`
+  shows whether Claude Code or Codex has been used there (and that SSH works
+  without a password).
 
-If none of these shows a computer where the user plausibly runs Claude Code or
-Codex, skip this step without asking. Otherwise ask about the ones you found by
+Leave out computers not used for weeks, servers the sessions only deploy to,
+and this computer itself under another name (such as its WSL). If none is
+left, skip this step without asking. Otherwise ask about the ones you found by
 name ("your sessions also worked on build-pc and the laptop; include the
 Claude and Codex logs there too?"). A server the sessions only deploy to is
 seldom one; say what you are unsure of.
@@ -321,7 +325,8 @@ again later.
 
 ## Commands
 
-Every command answers in JSON, except `check --hook` and `instructions`.
+Every command answers in JSON, except `check --hook`, `instructions` and
+`dashboard`, which print plain text; `index` also prints its progress first.
 
 | Command | What it does |
 |---|---|
