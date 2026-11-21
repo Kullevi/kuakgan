@@ -36,14 +36,17 @@ body { font: 400 14px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, -appl
 /* The frame is designed at 1200x630 and scaled to fit the window, centred. */
 .frame { position: absolute; left: 50%; top: 50%; width: 1200px; height: 630px; padding: 32px;
   transform: translate(-50%, -50%) scale(var(--scale, 1)); display: grid; gap: 24px;
-  grid-template-rows: 40px minmax(0, 1fr); }
+  grid-template-rows: 40px minmax(0, 1fr) 16px; }
 header { display: flex; align-items: center; gap: 16px; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 12px; flex: none; }
 .brand img { width: 32px; height: 32px; }
 .brand h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
 .scope { color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .spacer { flex: 1; }
-.site { color: var(--muted); font-size: 14px; display: none; }
+/* Who made it and where to get it, also in every screenshot. */
+.credit { margin: -12px 0 0; font-size: 12px; line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.credit a { color: var(--text); font-weight: 600; text-decoration: none; }
+.credit a:hover { text-decoration: underline; }
 .body { display: grid; gap: 24px; min-height: 0; grid-template-columns: 360px minmax(0, 1fr); }
 .right { display: grid; gap: 24px; min-height: 0; grid-template-rows: minmax(0, 1fr) 216px; }
 .pair { display: grid; gap: 24px; grid-template-columns: 1fr 1fr; min-height: 0; }
@@ -70,7 +73,6 @@ select, .btn { font: inherit; font-weight: 600; color: var(--text); background: 
 .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
 .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .shot-mode .tools { display: none; }
-.shot-mode .site { display: block; }
 
 /* Summary: the headline, three numbers and the models, whose colours are the chart's legend */
 .headline { font-size: 48px; font-weight: 650; line-height: 1.1; letter-spacing: -.02em; margin-top: 8px; }
@@ -118,7 +120,8 @@ body.busy::after { animation: loadbar 1.6s ease-in-out infinite; }
 
 /* A phone or a narrow window: the cards stack and the page scrolls. */
 body.narrow { overflow: auto; }
-.narrow .frame { position: static; transform: none; width: auto; height: auto; padding: 16px; grid-template-rows: auto auto; }
+.narrow .frame { position: static; transform: none; width: auto; height: auto; padding: 16px; grid-template-rows: auto auto auto; }
+.narrow .credit { margin: 0; white-space: normal; }
 .narrow header { flex-wrap: wrap; }
 .narrow header > .tools { flex-wrap: wrap; width: 100%; }
 .narrow .body, .narrow .pair { grid-template-columns: minmax(0, 1fr); }
@@ -142,7 +145,6 @@ body.narrow { overflow: auto; }
       <button class="btn" id="shot" type="button" title="Copies a 1200x630 picture of this view, ready to paste into a post or a chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.4"/></svg><span id="shot-text">Screenshot</span></button>
     </div>
-    <span class="site">github.com/Kullevi/kuakgan</span>
   </header>
   <div class="body">
     <section class="card">
@@ -166,6 +168,8 @@ body.narrow { overflow: auto; }
       </div>
     </div>
   </div>
+  <footer class="credit">Kuakgan is open source: <a href="https://github.com/Kullevi/kuakgan" target="_blank" rel="noopener">github.com/Kullevi/kuakgan</a>.
+    Built by the team behind <a href="https://kullevi.com" target="_blank" rel="noopener">Kullevi</a>, which builds AI that runs your company for you.</footer>
 </main>
 
 <script>
