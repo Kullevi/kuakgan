@@ -72,7 +72,7 @@ select, .btn { font: inherit; font-weight: 600; color: var(--text); background: 
 .btn:disabled { cursor: progress; opacity: .7; }
 .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
 .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
-.shot-mode .tools { display: none; }
+.shot-mode .tools, .shot-mode .fewer { display: none; }
 
 /* Summary: the headline, three numbers and the models, whose colours are the chart's legend */
 .headline { font-size: 48px; font-weight: 650; line-height: 1.1; letter-spacing: -.02em; margin-top: 8px; }
@@ -142,7 +142,7 @@ body.narrow { overflow: auto; }
       <select id="project" aria-label="Project"><option value="">All projects</option></select>
       <button class="btn" id="private" type="button" aria-pressed="false" title="Hides project, session and machine names, so the window can be shown or shared">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l16 16M9.9 5.7A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-2.6 3.4M6.3 7.2C3.9 8.9 2.5 12 2.5 12S6 18.5 12 18.5c1.6 0 3-.4 4.2-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>Private</button>
-      <button class="btn" id="shot" type="button" title="Copies a 1200x630 picture of this view, ready to paste into a post or a chat">
+      <button class="btn" id="shot" type="button" title="Copies a 1200x630 picture of this view (taller while a list is open), ready to paste into a post or a chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.4"/></svg><span id="shot-text">Screenshot</span></button>
     </div>
   </header>
@@ -305,9 +305,9 @@ if (appWindow) {
 // Shows as many whole items as fit. How many are shown goes in the card's head, or
 // below the list as "and N more" when there is no head for it. Clicking "and N more"
 // opens the whole list, scrolling inside its card, until "Show fewer".
-const opened = new Set();
+const opened = new Set((query.get("open") || "").split(",").filter(Boolean));  // the screenshot gets the window's
 function fill(box, items, more, countBox, count) {
-  const button = (text) => `<button type="button" class="more">${text}</button>`;
+  const button = (text, cls = "") => `<button type="button" class="more ${cls}">${text}</button>`;
   const open = opened.has(box.id);
   box.classList.toggle("open", open);
   box.onclick = (e) => {
@@ -317,7 +317,7 @@ function fill(box, items, more, countBox, count) {
   };
   box.innerHTML = items.join("");
   let shown = items.length;
-  const fewer = () => { box.innerHTML += button("Show fewer"); };
+  const fewer = () => { box.innerHTML += button("Show fewer", "fewer"); };
   if (document.body.classList.contains("narrow") && items.length > 10) {  // a phone: the ten biggest
     if (open) fewer();
     else {
@@ -555,6 +555,8 @@ $("shot").onclick = () => {
   btn.disabled = true; text.textContent = "Taking picture…";
   const q = new URLSearchParams({ days: state.days, metric: state.metric, private: state.private ? "1" : "0", theme: theme(), tz });
   if (state.project) q.set("project", state.project);
+  if (opened.size && !document.body.classList.contains("narrow")) q.set("open", [...opened].join(","));
+  if (extraHeight) q.set("height", frameHeight());
   const png = fetch("/screenshot.png?" + q, { headers: { "X-Kuakgan": "shot" }, cache: "no-store" })
     .then((r) => r.ok ? r.blob() : Promise.reject(new Error(r.status === 501 ? "Needs Edge or Chrome" : `HTTP ${r.status}`)));
   // Handed to the clipboard straight away, so the click still counts as the user's own.

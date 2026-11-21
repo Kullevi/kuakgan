@@ -1972,10 +1972,12 @@ def serve_dashboard(port: int, open_browser: bool) -> None:
                 if self.headers.get("X-Kuakgan") != "shot":
                     self.send_error(403)
                     return
-                # Always the 1200x630 frame (drawn at twice the size), the size of a link preview.
-                view = {k: q[k] for k in ("days", "project", "private", "metric", "theme", "tz") if q.get(k)}
+                # The 1200x630 frame (drawn at twice the size), the size of a link preview;
+                # taller, as in the window, while a list there is open.
+                view = {k: q[k] for k in ("days", "project", "private", "metric", "theme", "tz", "open") if q.get(k)}
+                height = int(q["height"]) if q.get("height", "").isdigit() else 630
                 with one_shot:
-                    body = screenshot(url + "?" + urlencode({**view, "shot": "1"}), 1200, 630)
+                    body = screenshot(url + "?" + urlencode({**view, "shot": "1"}), 1200, min(max(height, 630), 2000))
                 if body is None:
                     self.send_error(501, "Screenshots need Edge or Chrome")
                     return
