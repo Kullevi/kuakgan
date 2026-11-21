@@ -43,7 +43,7 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
    the next call of the same program, within three calls, that resembles the
    failed one and worked.
 6. **Prices are estimates.** List prices per million tokens are built in for
-   Anthropic and OpenAI models and can be added or changed in `prices.json`.
+   Anthropic, OpenAI and Google models and can be added or changed in `prices.json`.
    When prices change, every cost is worked out again from the stored token
    counts, without reading the logs. Models
    without a price count tokens but no cost, and the totals say how many
@@ -87,7 +87,7 @@ The choices behind Kuakgan, and why. `GOALS.md` says what it must achieve.
 
 ## Testing
 
-- Unit tests build small Claude Code and Codex logs in a temporary folder and
+- Unit tests build small Claude Code, Codex and Antigravity CLI logs in a temporary folder and
   check usage counting, command classification, each finding, `check`, and
   the dashboard's data.
 - GitHub Actions runs them on Linux, macOS and Windows with the oldest Python

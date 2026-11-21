@@ -5,10 +5,10 @@ out. `DESIGN.md` explains the choices behind it.
 
 ## Purpose
 
-People who build with Claude Code or Codex spend a lot of tokens and cannot see
+People who build with Claude Code, Codex or Antigravity spend a lot of tokens and cannot see
 where they go, or how much of it is waste: agents polling a log, re-reading
 the same files, rewriting the same helper script, and repeating mistakes that
-earlier sessions already made and fixed. Kuakgan reads the logs both tools
+earlier sessions already made and fixed. Kuakgan reads the logs these tools
 already keep and makes this visible, with a concrete fix for each kind of
 waste. It also gives the agents the lessons of earlier sessions, so they waste
 less on their own.
