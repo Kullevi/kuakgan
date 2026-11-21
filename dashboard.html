@@ -53,6 +53,9 @@ header { display: flex; align-items: center; gap: 16px; min-width: 0; }
 .card-head { display: flex; align-items: center; gap: 16px; height: 24px; flex: none; margin-bottom: 16px; }
 .list { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 8px; }
 .more, .empty, .count { color: var(--muted); font-size: 12px; }
+button.more { flex: none; align-self: flex-start; border: 0; background: none; padding: 0; font: inherit; font-size: 12px; cursor: pointer; }
+button.more:hover { color: var(--text); text-decoration: underline; }
+.list.open { overflow-y: auto; }
 
 /* Controls */
 .tools { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
@@ -283,17 +286,32 @@ if (query.get("app") === "1" && !shotMode) {
 }
 
 // Shows as many whole items as fit. How many are shown goes in the card's head, or
-// below the list as "and N more" when there is no head for it.
+// below the list as "and N more" when there is no head for it. Clicking "and N more"
+// opens the whole list, scrolling inside its card, until "Show fewer".
+const opened = new Set();
 function fill(box, items, more, countBox, count) {
+  const button = (text) => `<button type="button" class="more">${text}</button>`;
+  const open = opened.has(box.id);
+  box.classList.toggle("open", open);
+  box.onclick = (e) => {
+    if (!e.target.closest("button.more")) return;
+    opened.has(box.id) ? opened.delete(box.id) : opened.add(box.id);
+    render();
+  };
   box.innerHTML = items.join("");
   let shown = items.length;
+  const fewer = () => { box.innerHTML += button("Show fewer"); };
   if (document.body.classList.contains("narrow") && items.length > 10) {  // a phone: the ten biggest
-    shown = 10;
-    box.innerHTML = items.slice(0, 10).join("") + `<div class="more">and ${items.length - 10} more</div>`;
+    if (open) fewer();
+    else {
+      shown = 10;
+      box.innerHTML = items.slice(0, 10).join("") + button(`and ${items.length - 10} more`);
+    }
   } else if (!document.body.classList.contains("narrow")) {
-    while (shown > 1 && box.scrollHeight > box.clientHeight + 1) {
+    if (open) fewer();
+    else while (shown > 1 && box.scrollHeight > box.clientHeight + 1) {
       shown--;
-      box.innerHTML = items.slice(0, shown).join("") + (more ? `<div class="more">${more(items.length - shown)}</div>` : "");
+      box.innerHTML = items.slice(0, shown).join("") + (more ? button(more(items.length - shown)) : "");
     }
   }
   if (countBox) countBox.textContent = count(items.length, shown);
