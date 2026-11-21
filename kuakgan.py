@@ -1098,8 +1098,22 @@ def save_machines(machines: list[dict]) -> None:
     MACHINES_PATH.write_text(json.dumps({"machines": machines}, indent=2) + "\n", encoding="utf-8")
 
 
+@functools.cache
+def ssh_program() -> str | None:
+    """The ssh client. On Windows without OpenSSH installed, Git for Windows ships one
+    that a shortcut or a PowerShell does not have on its PATH."""
+    found = shutil.which("ssh")
+    if not found and os.name == "nt":
+        git = shutil.which("git")
+        roots = [Path(git).resolve().parent.parent] if git else []
+        roots += [Path(os.environ.get(v, "")) / "Git" for v in ("ProgramFiles", "ProgramW6432", "LOCALAPPDATA")]
+        found = next((str(r / "usr" / "bin" / "ssh.exe") for r in roots if (r / "usr" / "bin" / "ssh.exe").is_file()),
+                     None)
+    return found
+
+
 def ssh_command(m: dict, remote: str) -> list[str]:
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new",
+    cmd = [ssh_program() or "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new",
            "-o", "ServerAliveInterval=15", "-C"]
     if m.get("key"):
         cmd += ["-i", m["key"]]
@@ -1166,6 +1180,8 @@ def pull_machine(db: sqlite3.Connection, m: dict, quiet: bool = False) -> dict:
     """Brings the index up to date with machine m's logs: lists them over SSH and reads
     only new or changed files there, so only the results travel."""
     name = m["name"]
+    if not ssh_program():
+        return {"online": False, "error": "no ssh client on this computer"}
     python = remote_python(m)
     if not python:
         return {"online": False, "error": "no SSH connection, or no Python 3.9+ there"}
