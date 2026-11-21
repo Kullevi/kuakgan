@@ -201,8 +201,8 @@ Ask the user in one message whether they want:
    session learns from earlier mistakes and waste in its project, and judges
    what to do about it. This is what makes Kuakgan useful every day rather
    than once.
-2. **A Kuakgan shortcut**, and whether it should also open by itself when they
-   log in.
+2. **A Kuakgan shortcut** (desktop, Start menu, taskbar or Dock), and whether
+   it should also open by itself when they log in.
 
 Do what they say yes to.
 
