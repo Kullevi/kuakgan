@@ -34,7 +34,7 @@ body { font: 400 14px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, -appl
 .num { font-variant-numeric: tabular-nums; }
 
 /* The frame is designed at 1200x630 and scaled to fit the window, centred. */
-.frame { position: absolute; left: 50%; top: 50%; width: 1200px; height: 630px; padding: 32px;
+.frame { position: absolute; left: 50%; top: 50%; width: 1200px; height: var(--frame-h, 630px); padding: 32px;
   transform: translate(-50%, -50%) scale(var(--scale, 1)); display: grid; gap: 24px;
   grid-template-rows: 40px minmax(0, 1fr) 16px; }
 header { display: flex; align-items: center; gap: 16px; min-width: 0; }
@@ -169,7 +169,7 @@ body.narrow { overflow: auto; }
     </div>
   </div>
   <footer class="credit">Kuakgan is open source: <a href="https://github.com/Kullevi/kuakgan" target="_blank" rel="noopener">github.com/Kullevi/kuakgan</a>.
-    Built by the team behind <a href="https://kullevi.com" target="_blank" rel="noopener">Kullevi</a>, which builds AI that runs your company for you.</footer>
+    Built by the team behind <a href="https://kullevi.com" target="_blank" rel="noopener">kullevi.com</a>, which builds AI that runs your company for you.</footer>
 </main>
 
 <script>
@@ -267,25 +267,38 @@ function names() {
 }
 
 // The frame keeps its 1200x630 design and is scaled to the window; when that would make
-// the text too small to read, the cards stack instead and the page scrolls.
+// the text too small to read, the cards stack instead and the page scrolls. An opened
+// list makes the frame taller by what it needs, so it does not scroll in its card.
+let extraHeight = 0;
+const frameHeight = () => 630 + extraHeight;
 function fit() {
-  const scale = Math.min(innerWidth / 1200, innerHeight / 630);
+  const scale = Math.min(innerWidth / 1200, innerHeight / frameHeight());
   const narrow = !shotMode && (innerWidth < 960 || scale < 0.7);
   document.body.classList.toggle("narrow", narrow);
   document.documentElement.style.setProperty("--scale", narrow ? 1 : scale);
 }
 
-// The app window opens at the browser's chosen or remembered size; once, make its
-// height match the frame at that width, so there is no empty band.
-if (query.get("app") === "1" && !shotMode) {
+// The app window opens at the browser's chosen or remembered size; make its height match
+// the frame at that width, so there is no empty band: once at the start, and again when
+// a list opens or closes.
+const appWindow = query.get("app") === "1" && !shotMode;
+function fitWindow() {
+  if (!appWindow) return;
+  const want = Math.round(innerWidth * frameHeight() / 1200), extra = outerHeight - innerHeight;
+  const height = Math.min(want + extra, screen.availHeight);
+  if (Math.abs(height - outerHeight) > 2) {
+    try { resizeTo(outerWidth, height); } catch (e) { /* a normal tab cannot be resized */ }
+  }
+}
+function setExtraHeight(px) {
+  if (px === extraHeight) return;
+  extraHeight = px;
+  document.documentElement.style.setProperty("--frame-h", frameHeight() + "px");
+  fit();
+  fitWindow();
+}
+if (appWindow) {
   history.replaceState(null, "", location.pathname);
-  const fitWindow = () => {
-    const want = Math.round(innerWidth * 630 / 1200), extra = outerHeight - innerHeight;
-    const height = Math.min(want + extra, screen.availHeight);
-    if (Math.abs(height - outerHeight) > 2) {
-      try { resizeTo(outerWidth, height); } catch (e) { /* a normal tab cannot be resized */ }
-    }
-  };
   if (document.readyState === "complete") fitWindow(); else addEventListener("load", fitWindow);
 }
 
@@ -299,7 +312,7 @@ function fill(box, items, more, countBox, count) {
   box.classList.toggle("open", open);
   box.onclick = (e) => {
     if (!e.target.closest("button.more")) return;
-    opened.has(box.id) ? opened.delete(box.id) : opened.add(box.id);
+    if (opened.has(box.id)) { opened.delete(box.id); setExtraHeight(0); } else opened.add(box.id);
     render();
   };
   box.innerHTML = items.join("");
@@ -312,8 +325,10 @@ function fill(box, items, more, countBox, count) {
       box.innerHTML = items.slice(0, 10).join("") + button(`and ${items.length - 10} more`);
     }
   } else if (!document.body.classList.contains("narrow")) {
-    if (open) fewer();
-    else while (shown > 1 && box.scrollHeight > box.clientHeight + 1) {
+    if (open) {
+      fewer();
+      setExtraHeight(extraHeight + Math.max(0, box.scrollHeight - box.clientHeight));
+    } else while (shown > 1 && box.scrollHeight > box.clientHeight + 1) {
       shown--;
       box.innerHTML = items.slice(0, shown).join("") + (more ? button(more(items.length - shown)) : "");
     }
